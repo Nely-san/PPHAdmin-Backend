@@ -1,11 +1,14 @@
 // Prisma Schema for AdminOS - Employee & OJT HRIS, Biometrics, Attendance & Payroll
 
 generator client {
-  provider = "prisma-client-js"
+  provider                    = "prisma-client-py"
+  recursive_type_depth        = 5
+  enable_experimental_decimal = true
 }
 
 datasource db {
   provider = "mysql"
+  url      = env("DATABASE_URL")
 }
 
 // ==========================================

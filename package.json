@@ -2,11 +2,16 @@
   "name": "adminos-backend",
   "version": "1.0.0",
   "scripts": {
+    "dev": ".\\venv\\Scripts\\python -m uvicorn app.main:app --reload",
     "db:push": "prisma db push",
     "db:generate": "prisma generate",
     "db:migrate": "prisma migrate dev",
+    "db:seed": ".\\venv\\Scripts\\python prisma/seed.py",
     "db:studio": "prisma studio",
     "db:validate": "prisma validate"
+  },
+  "prisma": {
+    "seed": ".\\venv\\Scripts\\python prisma/seed.py"
   },
   "devDependencies": {
     "prisma": "^7.9.1"
