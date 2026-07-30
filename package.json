@@ -1,0 +1,17 @@
+{
+  "name": "adminos-backend",
+  "version": "1.0.0",
+  "scripts": {
+    "db:push": "prisma db push",
+    "db:generate": "prisma generate",
+    "db:migrate": "prisma migrate dev",
+    "db:studio": "prisma studio",
+    "db:validate": "prisma validate"
+  },
+  "devDependencies": {
+    "prisma": "^7.9.1"
+  },
+  "dependencies": {
+    "@prisma/client": "^7.9.1"
+  }
+}

@@ -1,0 +1,36 @@
+from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
+from app.core.config import settings
+from app.routes import auth, persons, attendance, payroll, companies
+
+app = FastAPI(
+    title="AdminOS API",
+    description="Backend API for Employee Records & Payroll Management System",
+    version="1.0.0",
+    docs_url="/docs",
+    redoc_url="/redoc"
+)
+
+# CORS Configuration
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=settings.BACKEND_CORS_ORIGINS,
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# Register Routers
+app.include_router(auth.router, prefix="/api/auth", tags=["Authentication"])
+app.include_router(persons.router, prefix="/api/persons", tags=["Persons (Employees & OJTs)"])
+app.include_router(attendance.router, prefix="/api/attendance", tags=["Attendance logs"])
+app.include_router(payroll.router, prefix="/api/payroll", tags=["Payroll Calculations"])
+app.include_router(companies.router, prefix="/api/companies", tags=["Companies"])
+
+@app.get("/")
+def read_root():
+    return {
+        "status": "online",
+        "app": "AdminOS API Server",
+        "documentation": "/docs"
+    }
