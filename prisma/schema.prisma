@@ -155,8 +155,8 @@ model Person {
   dateEnded      DateTime?
   status         PersonStatus   @default(ACTIVE)
 
-  companyId    String
-  company      Company     @relation(fields: [companyId], references: [id])
+  companyId    String?
+  company      Company?    @relation(fields: [companyId], references: [id])
   departmentId String?
   department   Department? @relation(fields: [departmentId], references: [id])
   userId       String?     @unique

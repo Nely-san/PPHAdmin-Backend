@@ -140,6 +140,24 @@ async def seed():
             }
         )
 
+        kaye_user = await db.user.create(
+            data={
+                "username": "kaye",
+                "email": "kaye.mendoza@adminos.com",
+                "passwordHash": default_user_password,
+                "role": Role.EMPLOYEE,
+            }
+        )
+
+        david_ojt_user = await db.user.create(
+            data={
+                "username": "ojt_david",
+                "email": "david.tan@mapua.edu.ph",
+                "passwordHash": default_user_password,
+                "role": Role.OJT,
+            }
+        )
+
         # ==========================================
         # 3. CREATE COMPANIES & DEPARTMENTS
         # ==========================================
@@ -357,6 +375,80 @@ async def seed():
                 "coordinatorContact": "Dr. Reyes (0918-987-6543)",
                 "requiredOjtHours": Decimal("480.00"),
                 "renderedOjtHours": Decimal("210.00"),
+            }
+        )
+
+        # Unassigned Employee 1: Kaye Mendoza (Unassigned Company & Dept)
+        kaye_person = await db.person.create(
+            data={
+                "biometricId": "77",
+                "name": "Kaye Mendoza",
+                "personType": PersonType.EMPLOYEE,
+                "employmentMode": EmploymentMode.FULL_TIME,
+                "rateType": RateType.MONTHLY,
+                "baseRate": Decimal("30000.00"),
+                "dateStarted": datetime(2026, 5, 1, tzinfo=timezone.utc),
+                "status": PersonStatus.ACTIVE,
+                "companyId": None,
+                "departmentId": None,
+                "userId": kaye_user.id,
+            }
+        )
+
+        # Unassigned Employee 2: Christian Flores (Unassigned Company & Dept)
+        christian_person = await db.person.create(
+            data={
+                "biometricId": "88",
+                "name": "Christian Flores",
+                "personType": PersonType.EMPLOYEE,
+                "employmentMode": EmploymentMode.CONTRACT,
+                "rateType": RateType.DAILY,
+                "baseRate": Decimal("800.00"),
+                "dateStarted": datetime(2026, 6, 1, tzinfo=timezone.utc),
+                "status": PersonStatus.ACTIVE,
+                "companyId": None,
+                "departmentId": None,
+            }
+        )
+
+        # Unassigned Trainee 1: David Tan (Unassigned OJT Intern)
+        david_ojt_person = await db.person.create(
+            data={
+                "biometricId": "104",
+                "name": "David Tan",
+                "personType": PersonType.OJT,
+                "employmentMode": EmploymentMode.INTERN,
+                "rateType": RateType.HOURLY,
+                "baseRate": Decimal("0.00"),
+                "dateStarted": datetime(2026, 7, 1, tzinfo=timezone.utc),
+                "status": PersonStatus.ACTIVE,
+                "companyId": None,
+                "departmentId": None,
+                "userId": david_ojt_user.id,
+                "schoolName": "Mapúa University",
+                "coordinatorContact": "Dr. Alonzo (0919-555-0192)",
+                "requiredOjtHours": Decimal("500.00"),
+                "renderedOjtHours": Decimal("45.00"),
+            }
+        )
+
+        # Unassigned Trainee 2: Patricia Gomez (Unassigned OJT Intern)
+        patricia_ojt_person = await db.person.create(
+            data={
+                "biometricId": "105",
+                "name": "Patricia Gomez",
+                "personType": PersonType.OJT,
+                "employmentMode": EmploymentMode.INTERN,
+                "rateType": RateType.HOURLY,
+                "baseRate": Decimal("0.00"),
+                "dateStarted": datetime(2026, 7, 10, tzinfo=timezone.utc),
+                "status": PersonStatus.ACTIVE,
+                "companyId": None,
+                "departmentId": None,
+                "schoolName": "University of Santo Tomas",
+                "coordinatorContact": "Prof. Villanueva (0920-888-7711)",
+                "requiredOjtHours": Decimal("400.00"),
+                "renderedOjtHours": Decimal("120.00"),
             }
         )
 

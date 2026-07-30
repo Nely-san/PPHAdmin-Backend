@@ -1,63 +1,65 @@
 from pydantic import BaseModel, Field
-from datetime import date
-from decimal import Decimal
-from enum import Enum
+from typing import Optional
 
-class PersonType(str, Enum):
-    EMPLOYEE = "EMPLOYEE"
-    OJT = "OJT"
-
-class EmploymentMode(str, Enum):
-    FULL_TIME = "FULL_TIME"
-    PART_TIME = "PART_TIME"
-    CONTRACT = "CONTRACT"
-
-class RateType(str, Enum):
-    DAILY = "DAILY"
-    MONTHLY = "MONTHLY"
-
-class PersonStatus(str, Enum):
-    ACTIVE = "ACTIVE"
-    ARCHIVED = "ARCHIVED"
-
-class PersonBase(BaseModel):
+class PersonCreateRequest(BaseModel):
     name: str
-    company_id: str
-    biometric_device_id: str | None = None
-    person_type: PersonType
-    employment_mode: EmploymentMode
-    rate_type: RateType
-    base_rate: Decimal = Field(default=Decimal("0.00"), max_digits=10, decimal_places=2)
-    date_started: date
-    date_ended: date | None = None
+    userId: Optional[str] = None
+    biometricId: Optional[str] = None
+    personType: str = "EMPLOYEE" # "EMPLOYEE" or "OJT"
+    employmentMode: str = "FULL_TIME" # "FULL_TIME", "PART_TIME", "CONTRACT", "INTERN"
+    rateType: str = "DAILY" # "DAILY", "MONTHLY", "HOURLY"
+    baseRate: float = 0.0
+    dateStarted: Optional[str] = None
+    status: str = "ACTIVE" # "ACTIVE", "ARCHIVED", "ON_LEAVE", "COMPLETED"
+    companyId: Optional[str] = None
+    departmentId: Optional[str] = None
     
-    # OJT Specific Fields
-    school_name: str | None = None
-    coordinator_contact: str | None = None
-    required_ojt_hours: int | None = None
+    # OJT Specific
+    schoolName: Optional[str] = None
+    coordinatorContact: Optional[str] = None
+    requiredOjtHours: Optional[float] = None
+    renderedOjtHours: Optional[float] = None
 
-class PersonCreate(PersonBase):
-    pass
-
-class PersonUpdate(BaseModel):
-    name: str | None = None
-    company_id: str | None = None
-    biometric_device_id: str | None = None
-    person_type: PersonType | None = None
-    employment_mode: EmploymentMode | None = None
-    rate_type: RateType | None = None
-    base_rate: Decimal | None = None
-    date_started: date | None = None
-    date_ended: date | None = None
-    status: PersonStatus | None = None
+class PersonUpdateRequest(BaseModel):
+    name: Optional[str] = None
+    userId: Optional[str] = None
+    biometricId: Optional[str] = None
+    personType: Optional[str] = None
+    employmentMode: Optional[str] = None
+    rateType: Optional[str] = None
+    baseRate: Optional[float] = None
+    dateStarted: Optional[str] = None
+    status: Optional[str] = None
+    companyId: Optional[str] = None
+    departmentId: Optional[str] = None
     
-    school_name: str | None = None
-    coordinator_contact: str | None = None
-    required_ojt_hours: int | None = None
+    schoolName: Optional[str] = None
+    coordinatorContact: Optional[str] = None
+    requiredOjtHours: Optional[float] = None
+    renderedOjtHours: Optional[float] = None
 
-class PersonResponse(PersonBase):
+class PersonDetailResponse(BaseModel):
     id: str
-    status: PersonStatus
+    userId: Optional[str] = None
+    biometricId: Optional[str] = None
+    name: str
+    personType: str
+    employmentMode: str
+    rateType: str
+    baseRate: float
+    dateStarted: Optional[str] = None
+    status: str
+    companyId: Optional[str] = None
+    companyName: Optional[str] = None
+    companyCode: Optional[str] = None
+    departmentId: Optional[str] = None
+    departmentName: Optional[str] = None
+    departmentCode: Optional[str] = None
+    schoolName: Optional[str] = None
+    coordinatorContact: Optional[str] = None
+    requiredOjtHours: Optional[float] = None
+    renderedOjtHours: Optional[float] = None
 
-    class Config:
-        from_attributes = True
+class QuickOjtHoursRequest(BaseModel):
+    hoursToAdd: float
+
