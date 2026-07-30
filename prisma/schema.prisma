@@ -111,6 +111,7 @@ model User {
   passwordHash String
   role         Role     @default(EMPLOYEE)
   person       Person?
+  isArchived   Boolean  @default(false)
   createdAt    DateTime @default(now())
   updatedAt    DateTime @updatedAt
 
