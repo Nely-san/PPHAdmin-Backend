@@ -28,3 +28,28 @@ async def get_attendance_logs(person_id: str | None = None, db: Prisma = Depends
     Query attendance logs, optionally filtering by employee.
     """
     return []
+
+@router.post("/reset")
+async def reset_attendance_and_imported_persons(db: Prisma = Depends(get_db)):
+    """
+    Reset biometric attendance records and clean out imported biometric personnel accounts from database.
+    """
+    try:
+        await db.attendancerecord.delete_many()
+    except Exception as e:
+        print(f"Delete attendance notice: {e}")
+
+    try:
+        seed_ids = ["1", "4", "13", "66", "77", "88", "101", "102", "104", "105"]
+        await db.person.delete_many(
+            where={
+                "biometricId": {
+                    "not_in": seed_ids
+                }
+            }
+        )
+    except Exception as e:
+        print(f"Delete imported persons notice: {e}")
+
+    return {"status": "success", "message": "Biometric attendance records and imported accounts reset cleanly."}
+

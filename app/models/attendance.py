@@ -33,3 +33,6 @@ class AttendanceImportResponse(BaseModel):
     file_name: str
     records_imported: int
     anomalies_detected: int
+    total_processed: int = 0
+    logs: list[dict] = []
+
