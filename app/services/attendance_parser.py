@@ -6,6 +6,22 @@ import pandas as pd
 from prisma import Prisma
 from app.models.attendance import AttendanceImportResponse
 
+def normalize_name(name: str) -> str:
+    if not name:
+        return ""
+    return re.sub(r'[^a-z0-9\s]', '', name.lower()).strip()
+
+def names_match(name1: str, name2: str) -> bool:
+    if not name1 or not name2:
+        return False
+    n1 = normalize_name(name1)
+    n2 = normalize_name(name2)
+    if n1 == n2:
+        return True
+    set1 = set(n1.split())
+    set2 = set(n2.split())
+    return set1 == set2 and len(set1) > 0
+
 async def parse_attendance_excel(file_bytes: bytes, file_name: str, db: Prisma) -> AttendanceImportResponse:
     """
     Service to parse biometric .xls/.xlsx files and import attendance logs for ALL 72+ accounts.
@@ -90,22 +106,38 @@ async def parse_attendance_excel(file_bytes: bytes, file_name: str, db: Prisma) 
 
         if account_map:
             imported_logs = list(account_map.values())
+            all_persons = await db.person.find_many()
             for bio_id, item in account_map.items():
                 try:
                     existing_person = await db.person.find_unique(where={"biometricId": bio_id})
                     if not existing_person:
-                        p_type = "OJT" if (bio_id.isdigit() and int(bio_id) >= 100) else "EMPLOYEE"
-                        await db.person.create(
-                            data={
-                                "biometricId": bio_id,
-                                "name": item["personName"],
-                                "personType": p_type,
-                                "employmentMode": "INTERN" if p_type == "OJT" else "FULL_TIME",
-                                "rateType": "HOURLY" if p_type == "OJT" else "DAILY",
-                                "baseRate": 0 if p_type == "OJT" else 750,
-                                "status": "ACTIVE",
-                            }
-                        )
+                        # Check if an existing person account exists with matching name but no biometric ID
+                        name_match_person = None
+                        for p in all_persons:
+                            if names_match(p.name, item["personName"]):
+                                name_match_person = p
+                                break
+
+                        if name_match_person:
+                            # Auto-link biometric ID to existing pre-created account!
+                            await db.person.update(
+                                where={"id": name_match_person.id},
+                                data={"biometricId": bio_id}
+                            )
+                        else:
+                            # Create new person record
+                            p_type = "OJT" if (bio_id.isdigit() and int(bio_id) >= 100) else "EMPLOYEE"
+                            await db.person.create(
+                                data={
+                                    "biometricId": bio_id,
+                                    "name": item["personName"],
+                                    "personType": p_type,
+                                    "employmentMode": "INTERN" if p_type == "OJT" else "FULL_TIME",
+                                    "rateType": "HOURLY" if p_type == "OJT" else "DAILY",
+                                    "baseRate": 0 if p_type == "OJT" else 750,
+                                    "status": "ACTIVE",
+                                }
+                            )
                 except Exception as ex:
                     print(f"Upsert notice: {ex}")
     except Exception as e:

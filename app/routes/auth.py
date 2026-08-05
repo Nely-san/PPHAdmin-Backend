@@ -1,3 +1,4 @@
+import asyncio
 from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.security import OAuth2PasswordBearer
 from jose import jwt, JWTError
@@ -83,7 +84,9 @@ async def login(request: LoginRequest, db: Prisma = Depends(get_db)):
         }
     )
 
-    if not user or not verify_password(request.password, user.passwordHash):
+    is_valid = await asyncio.to_thread(verify_password, request.password, user.passwordHash) if user else False
+
+    if not user or not is_valid:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Incorrect username or password"

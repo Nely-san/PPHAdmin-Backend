@@ -67,6 +67,15 @@ async def seed():
             }
         )
 
+        admin_user = await db.user.create(
+            data={
+                "username": "admin",
+                "email": "admin@adminos.com",
+                "passwordHash": default_admin_password,
+                "role": Role.ADMIN,
+            }
+        )
+
         hr_admin_user = await db.user.create(
             data={
                 "username": "hradmin",
@@ -760,6 +769,7 @@ async def seed():
         print("==================================================")
         print("\nSeeded Accounts Summary:")
         print("  Super Admin : superadmin / Admin@123")
+        print("  Admin       : admin / Admin@123")
         print("  HR Manager  : hradmin / Admin@123")
         print("  Payroll     : payroll / Admin@123")
         print("  Supervisor  : supervisor / Admin@123")

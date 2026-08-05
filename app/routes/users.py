@@ -106,6 +106,11 @@ async def create_user(
     if data.role == "OJT" and (not data.schoolName or not data.schoolName.strip()):
         raise HTTPException(status_code=400, detail="School / University is required when role is OJT")
 
+    if data.role == "SUPER_ADMIN":
+        existing_super_admin = await db.user.find_first(where={"role": "SUPER_ADMIN", "isArchived": False})
+        if existing_super_admin:
+            raise HTTPException(status_code=400, detail="System policy error: There can only be one active Super Admin in the system.")
+
     existing_user = await db.user.find_unique(where={"username": data.username})
     if existing_user:
         raise HTTPException(status_code=400, detail="Username already exists")
@@ -156,6 +161,11 @@ async def update_user(
 
     if data.role == "OJT" and data.schoolName is not None and not data.schoolName.strip():
         raise HTTPException(status_code=400, detail="School / University is required when role is OJT")
+
+    if data.role == "SUPER_ADMIN":
+        existing_super_admin = await db.user.find_first(where={"role": "SUPER_ADMIN", "isArchived": False, "id": {"not": user_id}})
+        if existing_super_admin:
+            raise HTTPException(status_code=400, detail="System policy error: There can only be one active Super Admin in the system.")
 
     user = await db.user.find_unique(where={"id": user_id}, include={"person": True})
     if not user:
@@ -219,6 +229,11 @@ async def archive_user(
     user = await db.user.find_unique(where={"id": user_id})
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
+
+    if user.role == "SUPER_ADMIN":
+        active_super_admins = await db.user.count(where={"role": "SUPER_ADMIN", "isArchived": False})
+        if active_super_admins <= 1:
+            raise HTTPException(status_code=400, detail="System policy error: Cannot archive the sole active Super Admin in the system.")
 
     updated_user = await db.user.update(
         where={"id": user_id},
