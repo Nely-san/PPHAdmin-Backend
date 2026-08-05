@@ -134,7 +134,7 @@ async def parse_attendance_excel(file_bytes: bytes, file_name: str, db: Prisma) 
                                     "personType": p_type,
                                     "employmentMode": "INTERN" if p_type == "OJT" else "FULL_TIME",
                                     "rateType": "HOURLY" if p_type == "OJT" else "DAILY",
-                                    "baseRate": 0 if p_type == "OJT" else 750,
+                                    "baseRate": 0,
                                     "status": "ACTIVE",
                                 }
                             )
