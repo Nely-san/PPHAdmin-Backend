@@ -61,7 +61,7 @@ async def seed():
         super_admin_user = await db.user.create(
             data={
                 "username": "superadmin",
-                "email": "superadmin@adminos.com",
+                "email": "superadmin@gmail.com",
                 "passwordHash": default_admin_password,
                 "role": Role.SUPER_ADMIN,
             }
@@ -70,7 +70,7 @@ async def seed():
         admin_user = await db.user.create(
             data={
                 "username": "admin",
-                "email": "admin@adminos.com",
+                "email": "admin@gmail.com",
                 "passwordHash": default_admin_password,
                 "role": Role.ADMIN,
             }
@@ -79,7 +79,7 @@ async def seed():
         hr_admin_user = await db.user.create(
             data={
                 "username": "hradmin",
-                "email": "hr@adminos.com",
+                "email": "hr@gmail.com",
                 "passwordHash": default_admin_password,
                 "role": Role.HR_MANAGER,
             }
@@ -88,7 +88,7 @@ async def seed():
         payroll_officer_user = await db.user.create(
             data={
                 "username": "payroll",
-                "email": "payroll@adminos.com",
+                "email": "payroll@gmail.com",
                 "passwordHash": default_admin_password,
                 "role": Role.PAYROLL_OFFICER,
             }
@@ -97,7 +97,7 @@ async def seed():
         supervisor_user = await db.user.create(
             data={
                 "username": "supervisor",
-                "email": "supervisor@adminos.com",
+                "email": "supervisor@gmail.com",
                 "passwordHash": default_admin_password,
                 "role": Role.SUPERVISOR,
             }
@@ -107,7 +107,7 @@ async def seed():
         jerald_user = await db.user.create(
             data={
                 "username": "jerald",
-                "email": "jerald.cruz@adminos.com",
+                "email": "jerald.cruz@gmail.com",
                 "passwordHash": default_user_password,
                 "role": Role.EMPLOYEE,
             }
@@ -116,7 +116,7 @@ async def seed():
         chabs_user = await db.user.create(
             data={
                 "username": "chabs",
-                "email": "chabs.santos@adminos.com",
+                "email": "chabs.santos@gmail.com",
                 "passwordHash": default_user_password,
                 "role": Role.EMPLOYEE,
             }
@@ -125,7 +125,7 @@ async def seed():
         famela_user = await db.user.create(
             data={
                 "username": "famela",
-                "email": "famela.valena@adminos.com",
+                "email": "famela.valena@gmail.com",
                 "passwordHash": default_user_password,
                 "role": Role.EMPLOYEE,
             }
@@ -134,7 +134,7 @@ async def seed():
         alex_ojt_user = await db.user.create(
             data={
                 "username": "ojt_alex",
-                "email": "alex.rivera@university.edu",
+                "email": "alex.rivera@gmail.com",
                 "passwordHash": default_user_password,
                 "role": Role.OJT,
             }
@@ -143,7 +143,7 @@ async def seed():
         maria_ojt_user = await db.user.create(
             data={
                 "username": "ojt_maria",
-                "email": "maria.santos@university.edu",
+                "email": "maria.santos@gmail.com",
                 "passwordHash": default_user_password,
                 "role": Role.OJT,
             }
@@ -152,7 +152,7 @@ async def seed():
         kaye_user = await db.user.create(
             data={
                 "username": "kaye",
-                "email": "kaye.mendoza@adminos.com",
+                "email": "kaye.mendoza@gmail.com",
                 "passwordHash": default_user_password,
                 "role": Role.EMPLOYEE,
             }
@@ -161,7 +161,7 @@ async def seed():
         david_ojt_user = await db.user.create(
             data={
                 "username": "ojt_david",
-                "email": "david.tan@mapua.edu.ph",
+                "email": "david.tan@gmail.com",
                 "passwordHash": default_user_password,
                 "role": Role.OJT,
             }
