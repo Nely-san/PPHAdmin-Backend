@@ -1,4 +1,4 @@
-// Prisma Schema for AdminOS - Employee & OJT HRIS, Biometrics, Attendance & Payroll
+// Prisma Schema for PPHAdmin - Employee & OJT HRIS, Biometrics, Attendance & Payroll
 
 generator client {
   provider                    = "prisma-client-py"

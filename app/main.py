@@ -14,7 +14,7 @@ async def lifespan(app: FastAPI):
         await prisma.disconnect()
 
 app = FastAPI(
-    title="AdminOS API",
+    title="PPHAdmin API",
     description="Backend API for Employee Records & Payroll Management System",
     version="1.0.0",
     lifespan=lifespan,
@@ -44,6 +44,6 @@ app.include_router(companies.router, prefix="/api/companies", tags=["Companies"]
 def read_root():
     return {
         "status": "online",
-        "app": "AdminOS API Server",
+        "app": "PPHAdmin API Server",
         "documentation": "/docs"
     }

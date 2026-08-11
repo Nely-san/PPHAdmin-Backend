@@ -1,4 +1,4 @@
-# AdminOS Role-Based Access Control (RBAC) Configuration for Backend
+# PPHAdmin Role-Based Access Control (RBAC) Configuration for Backend
 
 from typing import Dict, List
 

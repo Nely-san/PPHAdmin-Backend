@@ -10,6 +10,8 @@ from app.models.person import (
     PersonDetailResponse,
     QuickOjtHoursRequest,
 )
+from app.routes.auth import get_current_user
+from app.models.auth import UserProfile
 
 router = APIRouter()
 
@@ -153,13 +155,65 @@ async def create_person(payload: PersonCreateRequest, db: Prisma = Depends(get_d
 
 @router.put("/{person_id}", response_model=PersonDetailResponse)
 @router.patch("/{person_id}", response_model=PersonDetailResponse)
-async def update_person(person_id: str, payload: PersonUpdateRequest, db: Prisma = Depends(get_db)):
+async def update_person(
+    person_id: str,
+    payload: PersonUpdateRequest,
+    current_user: UserProfile = Depends(get_current_user),
+    db: Prisma = Depends(get_db)
+):
     """
     Modify an employee or OJT profile.
     """
     existing = await db.person.find_unique(where={"id": person_id})
     if not existing:
         raise HTTPException(status_code=404, detail="Person record not found")
+
+    if current_user.role in ["HR_MANAGER", "ADMIN", "SUPER_ADMIN"] and existing.companyId is not None:
+        is_changed = False
+        if payload.name is not None and payload.name != existing.name:
+            is_changed = True
+        if payload.userId is not None and payload.userId != (existing.userId or ""):
+            is_changed = True
+        if payload.biometricId is not None and payload.biometricId != (existing.biometricId or ""):
+            is_changed = True
+        if payload.personType is not None and payload.personType != existing.personType:
+            is_changed = True
+        if payload.employmentMode is not None and payload.employmentMode != existing.employmentMode:
+            is_changed = True
+        if payload.rateType is not None and payload.rateType != existing.rateType:
+            is_changed = True
+        if payload.status is not None and payload.status != existing.status:
+            is_changed = True
+        if payload.companyId is not None and payload.companyId != (existing.companyId or ""):
+            is_changed = True
+        if payload.departmentId is not None and payload.departmentId != (existing.departmentId or ""):
+            is_changed = True
+        if payload.schoolName is not None and payload.schoolName != (existing.schoolName or ""):
+            is_changed = True
+        if payload.coordinatorContact is not None and payload.coordinatorContact != (existing.coordinatorContact or ""):
+            is_changed = True
+            
+        if payload.dateStarted is not None:
+            existing_date_str = existing.dateStarted.strftime("%Y-%m-%d") if existing.dateStarted else ""
+            payload_date_str = payload.dateStarted[:10] if payload.dateStarted else ""
+            if payload_date_str != existing_date_str:
+                is_changed = True
+                
+        if payload.requiredOjtHours is not None:
+            existing_req = float(existing.requiredOjtHours) if existing.requiredOjtHours is not None else None
+            if payload.requiredOjtHours != existing_req:
+                is_changed = True
+                
+        if payload.renderedOjtHours is not None:
+            existing_ren = float(existing.renderedOjtHours) if existing.renderedOjtHours is not None else None
+            if payload.renderedOjtHours != existing_ren:
+                is_changed = True
+                
+        if is_changed:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="HR Managers, Admins, and Super Admins are only authorized to edit the base salary amount (Base Rate)."
+            )
 
     update_data = {}
     if payload.name is not None:

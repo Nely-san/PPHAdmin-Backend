@@ -25,7 +25,7 @@ from prisma.enums import (
 
 
 async def seed():
-    print("=== Starting AdminOS Database Seeding ===")
+    print("=== Starting PPHAdmin Database Seeding ===")
 
     db = Prisma()
     await db.connect()

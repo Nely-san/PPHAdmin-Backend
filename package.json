@@ -1,5 +1,5 @@
 {
-  "name": "adminos-backend",
+  "name": "pphadmin-backend",
   "version": "1.0.0",
   "scripts": {
     "dev": ".\\venv\\Scripts\\python -m uvicorn app.main:app --reload",

@@ -6,7 +6,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 class Settings:
-    PROJECT_NAME: str = "AdminOS"
+    PROJECT_NAME: str = "PPHAdmin"
     API_V1_STR: str = "/api"
     
     # Security
@@ -14,7 +14,7 @@ class Settings:
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 60 * 24 * 7  # 7 days
     
     # Database
-    DATABASE_URL: str = os.getenv("DATABASE_URL", "mysql://root:password@localhost:3306/adminos")
+    DATABASE_URL: str = os.getenv("DATABASE_URL", "mysql://root:password@localhost:3306/pphadmin")
     
     # CORS
     BACKEND_CORS_ORIGINS: List[str] = [

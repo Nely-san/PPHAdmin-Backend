@@ -1,7 +1,8 @@
 import uuid
 import re
 from io import BytesIO
-from datetime import datetime
+from datetime import datetime, timezone
+from decimal import Decimal
 import pandas as pd
 from prisma import Prisma
 from app.models.attendance import AttendanceImportResponse
@@ -21,6 +22,75 @@ def names_match(name1: str, name2: str) -> bool:
     set1 = set(n1.split())
     set2 = set(n2.split())
     return set1 == set2 and len(set1) > 0
+
+def normalize_date(cell_value) -> str | None:
+    if pd.isna(cell_value):
+        return None
+    
+    # If it's a pandas Timestamp or datetime object
+    if hasattr(cell_value, 'strftime'):
+        try:
+            return cell_value.strftime("%Y-%m-%d")
+        except:
+            pass
+
+    str_val = str(cell_value).strip()
+    if not str_val:
+        return None
+
+    # Check if it has date separators to ignore times/strings
+    if not any(char in str_val for char in ['-', '/', ',']):
+        return None
+
+    # Pattern YYYY-MM-DD
+    yyyymmdd = re.match(r'^(\d{4})[-/](\d{1,2})[-/](\d{1,2})', str_val)
+    if yyyymmdd:
+        y = yyyymmdd.group(1)
+        m = yyyymmdd.group(2).zfill(2)
+        d = yyyymmdd.group(3).zfill(2)
+        return f"{y}-{m}-{d}"
+
+    # Pattern MM/DD/YYYY or DD/MM/YYYY
+    mdys = re.match(r'^(\d{1,2})[-/](\d{1,2})[-/](\d{2,4})', str_val)
+    if mdys:
+        y_val = int(mdys.group(3))
+        if y_val < 100:
+            y_val += 2000
+        m = mdys.group(1).zfill(2)
+        d = mdys.group(2).zfill(2)
+        
+        month_val = int(m)
+        day_val = int(d)
+        if month_val > 12 and day_val <= 12:
+            return f"{y_val}-{str(day_val).zfill(2)}-{str(month_val).zfill(2)}"
+        return f"{y_val}-{m}-{d}"
+
+    # Try parsing as generic date
+    try:
+        parsed = pd.to_datetime(str_val, errors='raise')
+        return parsed.strftime("%Y-%m-%d")
+    except:
+        pass
+
+    return None
+
+def check_tardiness(am_in_str: str) -> tuple[bool, int]:
+    # Try parsing time like HH:MM
+    match = re.search(r'(\d{1,2}):(\d{2})', am_in_str)
+    if match:
+        h = int(match.group(1))
+        m = int(match.group(2))
+        if h < 7: # handle PM
+            h += 12
+        
+        total_mins = h * 60 + m
+        start_mins = 9 * 60 # 9:00 AM is 540
+        grace_mins = 9 * 60 + 10 # 9:10 AM is 550
+        
+        if total_mins > grace_mins:
+            late_mins = total_mins - start_mins
+            return True, late_mins
+    return False, 0
 
 async def parse_attendance_excel(file_bytes: bytes, file_name: str, db: Prisma) -> AttendanceImportResponse:
     """
@@ -42,6 +112,42 @@ async def parse_attendance_excel(file_bytes: bytes, file_name: str, db: Prisma) 
             current_name = None
             current_dept = None
 
+            # Detect Column Headers
+            bio_id_idx = -1
+            name_idx = -1
+            dept_idx = -1
+            date_idx = -1
+            am_in_idx = -1
+            am_out_idx = -1
+            pm_in_idx = -1
+            pm_out_idx = -1
+
+            for row_idx, row in df.iterrows():
+                row_str = " ".join([str(val).lower() for val in row.values if pd.notna(val)])
+                if ("name" in row_str or "person" in row_str or "employee" in row_str) and \
+                   ("no" in row_str or "id" in row_str or "ac-no" in row_str or "enroll" in row_str):
+                    for idx, cell in enumerate(row.values):
+                        if pd.isna(cell):
+                            continue
+                        str_cell = str(cell).strip().lower()
+                        if "ac-no" in str_cell or "enroll" in str_cell or "biometric" in str_cell or str_cell in ["no", "id", "no."]:
+                            bio_id_idx = idx
+                        elif "name" in str_cell or "employee" in str_cell or "person" in str_cell or "user" in str_cell:
+                            name_idx = idx
+                        elif "dept" in str_cell or "department" in str_cell or "division" in str_cell:
+                            dept_idx = idx
+                        elif "date" in str_cell:
+                            date_idx = idx
+                        elif "am in" in str_cell or "clock in" in str_cell or "time in" in str_cell or str_cell == "in":
+                            am_in_idx = idx
+                        elif "am out" in str_cell:
+                            am_out_idx = idx
+                        elif "pm in" in str_cell:
+                            pm_in_idx = idx
+                        elif "pm out" in str_cell or "clock out" in str_cell or "time out" in str_cell or str_cell == "out":
+                            pm_out_idx = idx
+                    break
+
             for row_idx, row in df.iterrows():
                 row_str = " ".join([str(val) for val in row.values if pd.notna(val)])
                 
@@ -57,57 +163,122 @@ async def parse_attendance_excel(file_bytes: bytes, file_name: str, db: Prisma) 
                 if dept_match:
                     current_dept = dept_match.group(1).strip()
 
-                # Extract numeric ID and Name from row values
+                # Extract numeric ID, Name, Date, and Times from row values
                 bio_id = None
                 person_name = None
                 dept_name = current_dept or "General Operations"
+                rec_date = today_str
+                am_in = "08:55"
+                am_out = "12:00"
+                pm_in = "13:00"
+                pm_out = "18:00"
 
-                if len(row) >= 2:
-                    c0 = str(row[0]).strip() if pd.notna(row[0]) else ""
-                    c1 = str(row[1]).strip() if pd.notna(row[1]) else ""
-                    c2 = str(row[2]).strip() if pd.notna(row[2]) and len(row) > 2 else ""
+                row_vals = list(row.values)
+                
+                # Try header-based indices first
+                if bio_id_idx >= 0 and bio_id_idx < len(row_vals) and pd.notna(row_vals[bio_id_idx]) and str(row_vals[bio_id_idx]).strip().isdigit():
+                    bio_id = str(row_vals[bio_id_idx]).strip()
+                    if name_idx >= 0 and name_idx < len(row_vals) and pd.notna(row_vals[name_idx]):
+                        person_name = str(row_vals[name_idx]).strip()
+                    if dept_idx >= 0 and dept_idx < len(row_vals) and pd.notna(row_vals[dept_idx]):
+                        dept_name = str(row_vals[dept_idx]).strip()
+                    if date_idx >= 0 and date_idx < len(row_vals) and pd.notna(row_vals[date_idx]):
+                        parsed_date = normalize_date(row_vals[date_idx])
+                        if parsed_date:
+                            rec_date = parsed_date
+                    if am_in_idx >= 0 and am_in_idx < len(row_vals) and pd.notna(row_vals[am_in_idx]):
+                        am_in = str(row_vals[am_in_idx]).strip()
+                    if am_out_idx >= 0 and am_out_idx < len(row_vals) and pd.notna(row_vals[am_out_idx]):
+                        am_out = str(row_vals[am_out_idx]).strip()
+                    if pm_in_idx >= 0 and pm_in_idx < len(row_vals) and pd.notna(row_vals[pm_in_idx]):
+                        pm_in = str(row_vals[pm_in_idx]).strip()
+                    if pm_out_idx >= 0 and pm_out_idx < len(row_vals) and pd.notna(row_vals[pm_out_idx]):
+                        pm_out = str(row_vals[pm_out_idx]).strip()
+                elif current_bio_id:
+                    bio_id = current_bio_id
+                    person_name = current_name or f"Personnel #{current_bio_id}"
+                    dept_name = current_dept or "General Operations"
+                    if date_idx >= 0 and date_idx < len(row_vals) and pd.notna(row_vals[date_idx]):
+                        parsed_date = normalize_date(row_vals[date_idx])
+                        if parsed_date:
+                            rec_date = parsed_date
+                    if am_in_idx >= 0 and am_in_idx < len(row_vals) and pd.notna(row_vals[am_in_idx]):
+                        am_in = str(row_vals[am_in_idx]).strip()
+                    if am_out_idx >= 0 and am_out_idx < len(row_vals) and pd.notna(row_vals[am_out_idx]):
+                        am_out = str(row_vals[am_out_idx]).strip()
+                    if pm_in_idx >= 0 and pm_in_idx < len(row_vals) and pd.notna(row_vals[pm_in_idx]):
+                        pm_in = str(row_vals[pm_in_idx]).strip()
+                    if pm_out_idx >= 0 and pm_out_idx < len(row_vals) and pd.notna(row_vals[pm_out_idx]):
+                        pm_out = str(row_vals[pm_out_idx]).strip()
+                else:
+                    # Fallback row check (Cell 0 numeric ID, Cell 1 Name string)
+                    if len(row_vals) >= 2:
+                        c0 = str(row_vals[0]).strip() if pd.notna(row_vals[0]) else ""
+                        c1 = str(row_vals[1]).strip() if pd.notna(row_vals[1]) else ""
+                        c2 = str(row_vals[2]).strip() if pd.notna(row_vals[2]) and len(row_vals) > 2 else ""
 
-                    if c0.isdigit() and len(c1) >= 2 and not c1.isdigit():
-                        bio_id = c0
-                        person_name = c1
-                        if c2 and not c2.isdigit():
-                            dept_name = c2
-                    elif c1.isdigit() and len(c2) >= 2 and not c2.isdigit():
-                        bio_id = c1
-                        person_name = c2
-                    elif current_bio_id:
-                        bio_id = current_bio_id
-                        person_name = current_name or f"Personnel #{current_bio_id}"
+                        if c0.isdigit() and len(c1) >= 2 and not c1.isdigit():
+                            bio_id = c0
+                            person_name = c1
+                            if c2 and not c2.isdigit():
+                                dept_name = c2
+                        elif c1.isdigit() and len(c2) >= 2 and not c2.isdigit():
+                            bio_id = c1
+                            person_name = c2
 
-                if bio_id and bio_id not in account_map:
-                    is_late = (int(bio_id) % 5 == 3)
-                    late_mins = 18 if is_late else 0
-                    if is_late:
-                        anomalies_count += 1
+                if bio_id:
+                    # Fallback cell scanning for the date if not correctly identified yet
+                    parsed_date = None
+                    if date_idx >= 0 and date_idx < len(row_vals) and pd.notna(row_vals[date_idx]):
+                        parsed_date = normalize_date(row_vals[date_idx])
+                    if not parsed_date:
+                        for cell in row_vals:
+                            d_val = normalize_date(cell)
+                            if d_val:
+                                parsed_date = d_val
+                                break
+                    if parsed_date:
+                        rec_date = parsed_date
 
-                    account_map[bio_id] = {
-                        "id": f"imported-{bio_id}-{uuid.uuid4().hex[:6]}",
-                        "biometricId": bio_id,
-                        "personName": person_name or f"Personnel #{bio_id}",
-                        "personType": "OJT" if int(bio_id) >= 100 else "EMPLOYEE",
-                        "date": today_str,
-                        "amIn": "09:18" if is_late else "08:55",
-                        "amOut": "12:00",
-                        "pmIn": "13:00",
-                        "pmOut": "18:00",
-                        "actualHours": 7.7 if is_late else 8.0,
-                        "tardinessMinutes": late_mins,
-                        "status": "LATE" if is_late else "PRESENT",
-                        "isAbnormal": is_late,
-                        "abnormalReason": "Late punch-in past 9:10 AM grace period threshold" if is_late else None,
-                        "departmentName": dept_name,
-                        "entryType": "BIOMETRIC",
-                    }
+                    key = f"{bio_id}_{rec_date}"
+                    if key not in account_map:
+                        is_late, late_mins = check_tardiness(am_in)
+                        if is_late:
+                            anomalies_count += 1
+
+                        p_type = "OJT" if (bio_id.isdigit() and int(bio_id) >= 100) else "EMPLOYEE"
+                        actual_hours = round(8.0 - (late_mins / 60.0), 2) if is_late else 8.0
+
+                        account_map[key] = {
+                            "id": f"imported-{bio_id}-{rec_date}-{uuid.uuid4().hex[:6]}",
+                            "biometricId": bio_id,
+                            "personName": person_name or f"Personnel #{bio_id}",
+                            "personType": p_type,
+                            "date": rec_date,
+                            "amIn": am_in,
+                            "amOut": am_out,
+                            "pmIn": pm_in,
+                            "pmOut": pm_out,
+                            "actualHours": actual_hours,
+                            "tardinessMinutes": late_mins,
+                            "status": "LATE" if is_late else "PRESENT",
+                            "isAbnormal": is_late,
+                            "abnormalReason": f"Late punch-in past 9:10 AM grace period threshold ({late_mins} mins late)" if is_late else None,
+                            "departmentName": dept_name,
+                            "entryType": "BIOMETRIC",
+                        }
 
         if account_map:
             imported_logs = list(account_map.values())
             all_persons = await db.person.find_many()
-            for bio_id, item in account_map.items():
+            processed_bio_ids = set()
+
+            # 1. Register/upsert Person accounts
+            for key, item in account_map.items():
+                bio_id = item["biometricId"]
+                if bio_id in processed_bio_ids:
+                    continue
+                processed_bio_ids.add(bio_id)
                 try:
                     existing_person = await db.person.find_unique(where={"biometricId": bio_id})
                     if not existing_person:
@@ -140,41 +311,74 @@ async def parse_attendance_excel(file_bytes: bytes, file_name: str, db: Prisma) 
                             )
                 except Exception as ex:
                     print(f"Upsert notice: {ex}")
+
+            # 2. Save/upsert AttendanceRecord entries to the database
+            for key, item in account_map.items():
+                bio_id = item["biometricId"]
+                rec_date = item["date"]
+                am_in = item["amIn"]
+                am_out = item["amOut"]
+                pm_in = item["pmIn"]
+                pm_out = item["pmOut"]
+                actual_hours = item["actualHours"]
+                late_mins = item["tardinessMinutes"]
+                is_late = item["isAbnormal"]
+
+                try:
+                    person = await db.person.find_unique(where={"biometricId": bio_id})
+                    if person:
+                        # Parse rec_date (YYYY-MM-DD) to datetime
+                        parts = rec_date.split("-")
+                        rec_date_dt = datetime(int(parts[0]), int(parts[1]), int(parts[2]), tzinfo=timezone.utc)
+
+                        def parse_time_helper(t_str):
+                            if not t_str or t_str == "None":
+                                return None
+                            try:
+                                t_parts = t_str.split(":")
+                                h = int(t_parts[0])
+                                m = int(t_parts[1])
+                                return datetime(rec_date_dt.year, rec_date_dt.month, rec_date_dt.day, h, m, 0, tzinfo=timezone.utc)
+                            except:
+                                return None
+
+                        am_in_dt = parse_time_helper(am_in)
+                        am_out_dt = parse_time_helper(am_out)
+                        pm_in_dt = parse_time_helper(pm_in)
+                        pm_out_dt = parse_time_helper(pm_out)
+
+                        # Check if record exists
+                        existing_rec = await db.attendancerecord.find_unique(
+                            where={"personId_date": {"personId": person.id, "date": rec_date_dt}}
+                        )
+
+                        record_data = {
+                            "personId": person.id,
+                            "date": rec_date_dt,
+                            "amIn": am_in_dt,
+                            "amOut": am_out_dt,
+                            "pmIn": pm_in_dt,
+                            "pmOut": pm_out_dt,
+                            "actualHours": Decimal(str(actual_hours)),
+                            "requiredHours": Decimal("8.00"),
+                            "tardinessMinutes": late_mins,
+                            "status": "LATE" if is_late else "PRESENT",
+                            "isAbnormal": is_late,
+                            "batchId": batch_id,
+                            "memo": item.get("abnormalReason")
+                        }
+
+                        if existing_rec:
+                            await db.attendancerecord.update(
+                                where={"id": existing_rec.id},
+                                data=record_data
+                            )
+                        else:
+                            await db.attendancerecord.create(data=record_data)
+                except Exception as ex:
+                    print(f"AttendanceRecord upsert error: {ex}")
     except Exception as e:
         print(f"Pandas Excel parse notice: {e}")
-
-
-    # 2. Fallback to database registered persons if file parse yields no records
-    if not imported_logs:
-        persons = await db.person.find_many(include={"department": True, "company": True})
-        schedules = [
-            {"am_in": "08:52", "am_out": "12:00", "pm_in": "13:00", "pm_out": "18:00", "late": 0, "status": "PRESENT", "abnormal": False},
-            {"am_in": "08:58", "am_out": "12:01", "pm_in": "13:00", "pm_out": "18:02", "late": 0, "status": "PRESENT", "abnormal": False},
-            {"am_in": "09:18", "am_out": "12:00", "pm_in": "13:00", "pm_out": "18:00", "late": 18, "status": "LATE", "abnormal": True, "reason": "Late punch-in past 9:10 AM grace period threshold"},
-        ]
-        for idx, person in enumerate(persons):
-            sch = schedules[idx % len(schedules)]
-            if sch["abnormal"]:
-                anomalies_count += 1
-            dept_name = person.department.name if person.department else "General Operations"
-            imported_logs.append({
-                "id": f"imported-{person.id}-{uuid.uuid4().hex[:6]}",
-                "biometricId": person.biometricId or str(idx + 1),
-                "personName": person.name,
-                "personType": getattr(person, "personType", "EMPLOYEE"),
-                "date": today_str,
-                "amIn": sch["am_in"],
-                "amOut": sch["am_out"],
-                "pmIn": sch["pm_in"],
-                "pmOut": sch["pm_out"],
-                "actualHours": 8.0 if sch["late"] == 0 else round(8.0 - (sch["late"] / 60.0), 2),
-                "tardinessMinutes": sch["late"],
-                "status": sch["status"],
-                "isAbnormal": sch["abnormal"],
-                "abnormalReason": sch.get("reason"),
-                "departmentName": dept_name,
-                "entryType": "BIOMETRIC",
-            })
 
     return AttendanceImportResponse(
         batch_id=batch_id,
