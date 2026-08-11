@@ -12,6 +12,26 @@ async def generate_payroll_draft(payload: PayrollGenerateRequest, db: Prisma = D
     Triggers cutoff payroll calculations for the specified dates and entities.
     """
     records = await compute_payroll_cutoff(payload.cutoff_start, payload.cutoff_end, payload.company_id, db)
+    
+    for record in records:
+        person = await db.person.find_unique(where={"id": record.person_id})
+        if person and person.userId:
+            from app.services.notification import dispatch_notification
+            from app.models.notification import NotificationCreate
+            from prisma.enums import NotificationPriority
+
+            await dispatch_notification(
+                NotificationCreate(
+                    userId=person.userId,
+                    title="Payroll Summary Ready",
+                    message=f"Payroll computation details for the cutoff starting {payload.cutoff_start} have been finalized.",
+                    category="PAYROLL",
+                    priority=NotificationPriority.LOW,
+                    actionUrl="my-payslips"
+                ),
+                db
+            )
+            
     return records
 
 @router.patch("/{payroll_id}/approve", response_model=PayrollRecordResponse)

@@ -25,6 +25,13 @@ enum Role {
   OJT
 }
 
+enum NotificationPriority {
+  LOW
+  MEDIUM
+  HIGH
+  CRITICAL
+}
+
 enum PersonType {
   EMPLOYEE
   OJT
@@ -105,15 +112,17 @@ enum PayrollItemType {
 // ==========================================
 
 model User {
-  id           String   @id @default(uuid())
-  username     String   @unique
-  email        String?  @unique
-  passwordHash String
-  role         Role     @default(EMPLOYEE)
-  person       Person?
-  isArchived   Boolean  @default(false)
-  createdAt    DateTime @default(now())
-  updatedAt    DateTime @updatedAt
+  id            String                  @id @default(uuid())
+  username      String                  @unique
+  email         String?                 @unique
+  passwordHash  String
+  role          Role                    @default(EMPLOYEE)
+  person        Person?
+  isArchived    Boolean                 @default(false)
+  notifications Notification[]
+  preferences   NotificationPreference?
+  createdAt     DateTime                @default(now())
+  updatedAt     DateTime                @updatedAt
 
   @@map("users")
 }
@@ -403,4 +412,37 @@ model PayrollItem {
   amount          Decimal         @db.Decimal(12, 2)
 
   @@map("payroll_items")
+}
+
+model Notification {
+  id          String               @id @default(uuid())
+  userId      String
+  user        User                 @relation(fields: [userId], references: [id], onDelete: Cascade)
+  title       String
+  message     String
+  isRead      Boolean              @default(false)
+  priority    NotificationPriority @default(MEDIUM)
+  category    String               @default("INFO")
+  actionUrl   String?
+  createdAt   DateTime             @default(now())
+  updatedAt   DateTime             @updatedAt
+
+  @@index([userId])
+  @@index([isRead])
+  @@index([userId, createdAt])
+  @@map("notifications")
+}
+
+model NotificationPreference {
+  id               String   @id @default(uuid())
+  userId           String   @unique
+  user             User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  enableInApp      Boolean  @default(true)
+  notifyAttendance Boolean  @default(true)
+  notifyPayroll    Boolean  @default(true)
+  notifyLeave      Boolean  @default(true)
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+
+  @@map("notification_preferences")
 }

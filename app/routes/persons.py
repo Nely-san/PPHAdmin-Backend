@@ -252,6 +252,16 @@ async def update_person(
     if payload.renderedOjtHours is not None:
         update_data["renderedOjtHours"] = Decimal(str(payload.renderedOjtHours))
 
+    # Auto-calculate OJT hours based on biometric attendance records when setup is completed
+    is_ojt = (payload.personType == "OJT" if payload.personType is not None else existing.personType == "OJT")
+    is_setting_up = (existing.companyId is None and payload.companyId is not None and payload.companyId.strip() != "")
+    if is_ojt and is_setting_up:
+        records = await db.attendancerecord.find_many(where={"personId": person_id})
+        total_hours = sum(float(r.actualHours) for r in records)
+        current_rendered = float(existing.renderedOjtHours or 0.0)
+        if current_rendered < total_hours:
+            update_data["renderedOjtHours"] = Decimal(str(round(total_hours, 2)))
+
     updated = await db.person.update(where={"id": person_id}, data=update_data)
 
     reloaded = await db.person.find_unique(

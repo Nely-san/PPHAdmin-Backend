@@ -34,24 +34,34 @@ def normalize_date(cell_value) -> str | None:
         except:
             pass
 
+    # Support Excel date serial numbers (e.g. 46241 representing August 11, 2026)
+    try:
+        val_float = float(cell_value)
+        # Excel date serial numbers for modern dates (1982 to 2064) fall between 30000 and 60000.
+        if 30000 <= val_float <= 60000:
+            parsed_dt = pd.to_datetime(val_float, unit='D', origin='1899-12-30')
+            return parsed_dt.strftime("%Y-%m-%d")
+    except:
+        pass
+
     str_val = str(cell_value).strip()
     if not str_val:
         return None
 
-    # Check if it has date separators to ignore times/strings
-    if not any(char in str_val for char in ['-', '/', ',']):
+    # Check if it has date separators (including dot and spaces) to ignore simple times
+    if not any(char in str_val for char in ['-', '/', ',', '.', ' ']):
         return None
 
-    # Pattern YYYY-MM-DD
-    yyyymmdd = re.match(r'^(\d{4})[-/](\d{1,2})[-/](\d{1,2})', str_val)
+    # Pattern YYYY-MM-DD or YYYY.MM.DD or YYYY/MM/DD
+    yyyymmdd = re.match(r'^(\d{4})[-/\.](\d{1,2})[-/\.](\d{1,2})', str_val)
     if yyyymmdd:
         y = yyyymmdd.group(1)
         m = yyyymmdd.group(2).zfill(2)
         d = yyyymmdd.group(3).zfill(2)
         return f"{y}-{m}-{d}"
 
-    # Pattern MM/DD/YYYY or DD/MM/YYYY
-    mdys = re.match(r'^(\d{1,2})[-/](\d{1,2})[-/](\d{2,4})', str_val)
+    # Pattern MM/DD/YYYY or DD/MM/YYYY etc.
+    mdys = re.match(r'^(\d{1,2})[-/\.](\d{1,2})[-/\.](\d{2,4})', str_val)
     if mdys:
         y_val = int(mdys.group(3))
         if y_val < 100:
@@ -101,6 +111,7 @@ async def parse_attendance_excel(file_bytes: bytes, file_name: str, db: Prisma) 
     
     imported_logs = []
     anomalies_count = 0
+    newly_created_accounts_count = 0
 
     # 1. Try parsing Excel bytes using pandas / openpyxl / xlrd
     try:
@@ -111,6 +122,7 @@ async def parse_attendance_excel(file_bytes: bytes, file_name: str, db: Prisma) 
             current_bio_id = None
             current_name = None
             current_dept = None
+            last_parsed_date = today_str
 
             # Detect Column Headers
             bio_id_idx = -1
@@ -167,7 +179,7 @@ async def parse_attendance_excel(file_bytes: bytes, file_name: str, db: Prisma) 
                 bio_id = None
                 person_name = None
                 dept_name = current_dept or "General Operations"
-                rec_date = today_str
+                rec_date = last_parsed_date
                 am_in = "08:55"
                 am_out = "12:00"
                 pm_in = "13:00"
@@ -186,6 +198,7 @@ async def parse_attendance_excel(file_bytes: bytes, file_name: str, db: Prisma) 
                         parsed_date = normalize_date(row_vals[date_idx])
                         if parsed_date:
                             rec_date = parsed_date
+                            last_parsed_date = parsed_date
                     if am_in_idx >= 0 and am_in_idx < len(row_vals) and pd.notna(row_vals[am_in_idx]):
                         am_in = str(row_vals[am_in_idx]).strip()
                     if am_out_idx >= 0 and am_out_idx < len(row_vals) and pd.notna(row_vals[am_out_idx]):
@@ -202,6 +215,7 @@ async def parse_attendance_excel(file_bytes: bytes, file_name: str, db: Prisma) 
                         parsed_date = normalize_date(row_vals[date_idx])
                         if parsed_date:
                             rec_date = parsed_date
+                            last_parsed_date = parsed_date
                     if am_in_idx >= 0 and am_in_idx < len(row_vals) and pd.notna(row_vals[am_in_idx]):
                         am_in = str(row_vals[am_in_idx]).strip()
                     if am_out_idx >= 0 and am_out_idx < len(row_vals) and pd.notna(row_vals[am_out_idx]):
@@ -239,6 +253,7 @@ async def parse_attendance_excel(file_bytes: bytes, file_name: str, db: Prisma) 
                                 break
                     if parsed_date:
                         rec_date = parsed_date
+                        last_parsed_date = parsed_date
 
                     key = f"{bio_id}_{rec_date}"
                     if key not in account_map:
@@ -272,6 +287,33 @@ async def parse_attendance_excel(file_bytes: bytes, file_name: str, db: Prisma) 
             imported_logs = list(account_map.values())
             all_persons = await db.person.find_many()
             processed_bio_ids = set()
+
+            # 0. Create BiometricImportBatch record
+            try:
+                # Determine date range from account_map
+                dates = [item["date"] for item in account_map.values() if item.get("date")]
+                min_date = None
+                max_date = None
+                if dates:
+                    min_date_str = min(dates)
+                    max_date_str = max(dates)
+                    p_min = min_date_str.split("-")
+                    p_max = max_date_str.split("-")
+                    min_date = datetime(int(p_min[0]), int(p_min[1]), int(p_min[2]), tzinfo=timezone.utc)
+                    max_date = datetime(int(p_max[0]), int(p_max[1]), int(p_max[2]), tzinfo=timezone.utc)
+
+                await db.biometricimportbatch.create(
+                    data={
+                        "id": batch_id,
+                        "fileName": file_name,
+                        "periodStart": min_date,
+                        "periodEnd": max_date,
+                        "recordsImported": len(account_map),
+                        "anomaliesDetected": anomalies_count
+                    }
+                )
+            except Exception as batch_ex:
+                print(f"BiometricImportBatch creation error: {batch_ex}")
 
             # 1. Register/upsert Person accounts
             for key, item in account_map.items():
@@ -307,8 +349,10 @@ async def parse_attendance_excel(file_bytes: bytes, file_name: str, db: Prisma) 
                                     "rateType": "HOURLY" if p_type == "OJT" else "DAILY",
                                     "baseRate": 0,
                                     "status": "ACTIVE",
+                                    "dateStarted": datetime.now(timezone.utc),
                                 }
                             )
+                            newly_created_accounts_count += 1
                 except Exception as ex:
                     print(f"Upsert notice: {ex}")
 
@@ -369,14 +413,83 @@ async def parse_attendance_excel(file_bytes: bytes, file_name: str, db: Prisma) 
                         }
 
                         if existing_rec:
+                            old_hours = float(existing_rec.actualHours or 0.0)
+                            diff = float(actual_hours) - old_hours
+                            
                             await db.attendancerecord.update(
                                 where={"id": existing_rec.id},
                                 data=record_data
                             )
+                            
+                            if person.personType == "OJT" and diff != 0:
+                                latest_p = await db.person.find_unique(where={"id": person.id})
+                                if latest_p:
+                                    current_rendered = float(latest_p.renderedOjtHours or 0.0)
+                                    new_rendered = max(0.0, current_rendered + diff)
+                                    await db.person.update(
+                                        where={"id": person.id},
+                                        data={"renderedOjtHours": Decimal(str(round(new_rendered, 2)))}
+                                    )
                         else:
                             await db.attendancerecord.create(data=record_data)
+                            
+                            if person.personType == "OJT" and float(actual_hours) > 0:
+                                latest_p = await db.person.find_unique(where={"id": person.id})
+                                if latest_p:
+                                    current_rendered = float(latest_p.renderedOjtHours or 0.0)
+                                    new_rendered = max(0.0, current_rendered + float(actual_hours))
+                                    await db.person.update(
+                                        where={"id": person.id},
+                                        data={"renderedOjtHours": Decimal(str(round(new_rendered, 2)))}
+                                    )
+
+                        if is_late and person.userId:
+                            from app.services.notification import dispatch_notification
+                            from app.models.notification import NotificationCreate
+                            from prisma.enums import NotificationPriority
+                            
+                            await dispatch_notification(
+                                NotificationCreate(
+                                    userId=person.userId,
+                                    title="Attendance Exception Flagged",
+                                    message=f"Your attendance record on {rec_date} has been marked abnormal: {item.get('abnormalReason')}",
+                                    category="ATTENDANCE",
+                                    priority=NotificationPriority.MEDIUM,
+                                    actionUrl="my-attendance"
+                                ),
+                                db
+                            )
                 except Exception as ex:
                     print(f"AttendanceRecord upsert error: {ex}")
+
+            # Dispatch notification to all HR Managers and Admins
+            try:
+                from app.services.notification import dispatch_notification
+                from app.models.notification import NotificationCreate
+                from prisma.enums import NotificationPriority, Role
+
+                recipients = await db.user.find_many(
+                    where={
+                        "role": {
+                            "in": [Role.SUPER_ADMIN, Role.ADMIN, Role.HR_MANAGER]
+                        }
+                    }
+                )
+
+                for recipient in recipients:
+                    await dispatch_notification(
+                        NotificationCreate(
+                            userId=recipient.id,
+                            title="New Biometrics Imported",
+                            message=f"Biometric file '{file_name}' was successfully imported (Batch: {batch_id}). {newly_created_accounts_count} new personnel accounts registered, {len(imported_logs)} records processed, {anomalies_count} anomalies detected.",
+                            category="BIOMETRIC",
+                            priority=NotificationPriority.MEDIUM,
+                            actionUrl="attendance"
+                        ),
+                        db
+                    )
+            except Exception as notif_err:
+                print(f"Failed to dispatch biometric import notification: {notif_err}")
     except Exception as e:
         print(f"Pandas Excel parse notice: {e}")
 

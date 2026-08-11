@@ -21,6 +21,7 @@ from prisma.enums import (
     AbnormalStatus,
     PayrollStatus,
     PayrollItemType,
+    NotificationPriority,
 )
 
 
@@ -48,6 +49,8 @@ async def seed():
         await db.person.delete_many()
         await db.department.delete_many()
         await db.company.delete_many()
+        await db.notificationpreference.delete_many()
+        await db.notification.delete_many()
         await db.user.delete_many()
         print(" -> Clean completed.")
 
@@ -763,6 +766,224 @@ async def seed():
                 },
             ]
         )
+
+        # ==========================================
+        # 11. CREATE NOTIFICATIONS & PREFERENCES
+        # ==========================================
+        print("[11/10] Seeding Notification Preferences & Notifications...")
+        all_users = [
+            super_admin_user,
+            admin_user,
+            hr_admin_user,
+            payroll_officer_user,
+            supervisor_user,
+            jerald_user,
+            chabs_user,
+            famela_user,
+            alex_ojt_user,
+            maria_ojt_user,
+            kaye_user,
+            david_ojt_user,
+        ]
+
+        for u in all_users:
+            await db.notificationpreference.create(
+                data={
+                    "userId": u.id,
+                    "enableInApp": True,
+                    "notifyAttendance": True,
+                    "notifyPayroll": True,
+                    "notifyLeave": True,
+                }
+            )
+
+        notifications_data = [
+            # HR Manager Notifications
+            {
+                "userId": hr_admin_user.id,
+                "title": "Pending Abnormal Clocking Request",
+                "message": "Chabs Santos submitted an abnormal clocking request for 2026-07-03 (35 mins late). Reason: Traffic congestion along EDSA due to heavy rain.",
+                "category": "ATTENDANCE",
+                "priority": NotificationPriority.HIGH,
+                "actionUrl": "attendance-exceptions",
+                "createdAt": datetime(2026, 7, 3, 9, 0, 0, tzinfo=timezone.utc),
+            },
+            {
+                "userId": hr_admin_user.id,
+                "title": "Biometric Import Complete",
+                "message": "Import batch '07Statistic.xls' successfully processed: 84 records imported, 2 anomalies detected.",
+                "category": "BIOMETRIC",
+                "priority": NotificationPriority.MEDIUM,
+                "actionUrl": "attendance",
+                "createdAt": datetime(2026, 7, 14, 18, 0, 0, tzinfo=timezone.utc),
+            },
+            {
+                "userId": hr_admin_user.id,
+                "title": "Unassigned Personnel Detected",
+                "message": "There are 4 active personnel (Kaye Mendoza, Christian Flores, David Tan, Patricia Gomez) without a company or department assignment.",
+                "category": "HR",
+                "priority": NotificationPriority.MEDIUM,
+                "actionUrl": "employees",
+                "createdAt": datetime(2026, 7, 10, 10, 0, 0, tzinfo=timezone.utc),
+            },
+            # Admin Notifications
+            {
+                "userId": admin_user.id,
+                "title": "Pending Abnormal Clocking Request",
+                "message": "Chabs Santos submitted an abnormal clocking request for 2026-07-03 (35 mins late). Reason: Traffic congestion along EDSA due to heavy rain.",
+                "category": "ATTENDANCE",
+                "priority": NotificationPriority.HIGH,
+                "actionUrl": "dashboard",
+                "createdAt": datetime(2026, 7, 3, 9, 0, 0, tzinfo=timezone.utc),
+            },
+            {
+                "userId": admin_user.id,
+                "title": "Unassigned Personnel Detected",
+                "message": "There are 4 active personnel (Kaye Mendoza, Christian Flores, David Tan, Patricia Gomez) without a company or department assignment.",
+                "category": "HR",
+                "priority": NotificationPriority.MEDIUM,
+                "actionUrl": "employees",
+                "createdAt": datetime(2026, 7, 10, 10, 0, 0, tzinfo=timezone.utc),
+            },
+            # Payroll Officer Notifications
+            {
+                "userId": payroll_officer_user.id,
+                "title": "Payroll Review Required",
+                "message": "Payroll for Chabs Santos (Period: 2026-07-01 to 2026-07-14) is currently in DRAFT status. Deductions applied: 185.94 PHP.",
+                "category": "PAYROLL",
+                "priority": NotificationPriority.HIGH,
+                "actionUrl": "payroll",
+                "createdAt": datetime(2026, 7, 14, 17, 30, 0, tzinfo=timezone.utc),
+            },
+            {
+                "userId": payroll_officer_user.id,
+                "title": "Payroll Record Approved",
+                "message": "Payroll record for Jerald Cruz (Period: 2026-07-01 to 2026-07-14) has been APPROVED. Net Pay: 16,196.88 PHP.",
+                "category": "PAYROLL",
+                "priority": NotificationPriority.MEDIUM,
+                "actionUrl": "payroll",
+                "createdAt": datetime(2026, 7, 14, 17, 15, 0, tzinfo=timezone.utc),
+            },
+            # Supervisor Notifications
+            {
+                "userId": supervisor_user.id,
+                "title": "Abnormal Clocking Review",
+                "message": "Pending abnormal clocking request from Chabs Santos (July 3, 2026) requires your approval.",
+                "category": "ATTENDANCE",
+                "priority": NotificationPriority.HIGH,
+                "actionUrl": "team-exceptions",
+                "createdAt": datetime(2026, 7, 3, 9, 5, 0, tzinfo=timezone.utc),
+            },
+            {
+                "userId": supervisor_user.id,
+                "title": "OJT Milestone Reached",
+                "message": "Alex Rivera has rendered 80.00 hours during the latest cutoff (Total: 184.50 / 500.00 hours).",
+                "category": "OJT",
+                "priority": NotificationPriority.LOW,
+                "actionUrl": "team-attendance",
+                "createdAt": datetime(2026, 7, 14, 17, 0, 0, tzinfo=timezone.utc),
+            },
+            # Employee: Jerald Cruz
+            {
+                "userId": jerald_user.id,
+                "title": "Payslip Available",
+                "message": "Your payroll for period 2026-07-01 to 2026-07-14 has been approved. Net Pay: 16,196.88 PHP.",
+                "category": "PAYROLL",
+                "priority": NotificationPriority.MEDIUM,
+                "actionUrl": "my-payslips",
+                "createdAt": datetime(2026, 7, 14, 17, 20, 0, tzinfo=timezone.utc),
+            },
+            {
+                "userId": jerald_user.id,
+                "title": "Overtime Approved",
+                "message": "Your overtime request of 2.50 hours for the July 1-14 cutoff has been approved.",
+                "category": "ATTENDANCE",
+                "priority": NotificationPriority.LOW,
+                "actionUrl": "my-attendance",
+                "createdAt": datetime(2026, 7, 14, 16, 0, 0, tzinfo=timezone.utc),
+            },
+            # Employee: Chabs Santos
+            {
+                "userId": chabs_user.id,
+                "title": "Late Clock-in Warning",
+                "message": "You were marked LATE on July 3, 2026 (Clock-in: 08:35 AM). Please file an abnormal clocking request if you have a valid reason.",
+                "category": "ATTENDANCE",
+                "priority": NotificationPriority.MEDIUM,
+                "actionUrl": "my-attendance",
+                "createdAt": datetime(2026, 7, 3, 8, 40, 0, tzinfo=timezone.utc),
+            },
+            {
+                "userId": chabs_user.id,
+                "title": "Abnormal Clocking Submitted",
+                "message": "Your abnormal clocking explanation for July 3, 2026, has been submitted and is PENDING review.",
+                "category": "ATTENDANCE",
+                "priority": NotificationPriority.LOW,
+                "actionUrl": "my-attendance",
+                "createdAt": datetime(2026, 7, 3, 9, 0, 0, tzinfo=timezone.utc),
+            },
+            {
+                "userId": chabs_user.id,
+                "title": "Payroll Generated (Draft)",
+                "message": "Your semi-monthly payroll draft is ready. Net Pay: 7,814.06 PHP (Deductions: 685.94 PHP).",
+                "category": "PAYROLL",
+                "priority": NotificationPriority.LOW,
+                "actionUrl": "my-payslips",
+                "createdAt": datetime(2026, 7, 14, 17, 35, 0, tzinfo=timezone.utc),
+            },
+            # Employee: Famela Valena
+            {
+                "userId": famela_user.id,
+                "title": "Work Schedule Updated",
+                "message": "Your regular work schedule for period 2026-07-01 to 2026-07-14 has been posted.",
+                "category": "ATTENDANCE",
+                "priority": NotificationPriority.LOW,
+                "actionUrl": "my-roster",
+                "createdAt": datetime(2026, 7, 1, 8, 0, 0, tzinfo=timezone.utc),
+            },
+            # Employee: Alex Rivera (OJT)
+            {
+                "userId": alex_ojt_user.id,
+                "title": "OJT Progress Update",
+                "message": "You have rendered 80.00 hours during this cutoff. Total Rendered: 184.50 / 500.00 hours (36.9% completed).",
+                "category": "OJT",
+                "priority": NotificationPriority.LOW,
+                "actionUrl": "my-internship-hours",
+                "createdAt": datetime(2026, 7, 14, 17, 5, 0, tzinfo=timezone.utc),
+            },
+            # Employee: Maria Santos (OJT)
+            {
+                "userId": maria_ojt_user.id,
+                "title": "OJT Progress Update",
+                "message": "You have rendered 210.00 hours towards your required 480.00 hours target (43.8% completed).",
+                "category": "OJT",
+                "priority": NotificationPriority.LOW,
+                "actionUrl": "my-internship-hours",
+                "createdAt": datetime(2026, 7, 14, 17, 5, 0, tzinfo=timezone.utc),
+            },
+            # Employee: Kaye Mendoza
+            {
+                "userId": kaye_user.id,
+                "title": "Unassigned Profile Action Required",
+                "message": "You are not assigned to a Company or Department. Please update your profile or contact HR.",
+                "category": "HR",
+                "priority": NotificationPriority.HIGH,
+                "actionUrl": "dashboard",
+                "createdAt": datetime(2026, 7, 10, 10, 5, 0, tzinfo=timezone.utc),
+            },
+            # Employee: David Tan (OJT)
+            {
+                "userId": david_ojt_user.id,
+                "title": "Unassigned Profile Action Required",
+                "message": "You are not assigned to a Company or Department. Please contact HR to resolve your OJT placement.",
+                "category": "HR",
+                "priority": NotificationPriority.HIGH,
+                "actionUrl": "dashboard",
+                "createdAt": datetime(2026, 7, 10, 10, 5, 0, tzinfo=timezone.utc),
+            },
+        ]
+
+        for notif in notifications_data:
+            await db.notification.create(data=notif)
 
         print("\n==================================================")
         print("   Database Seeding Completed Successfully!       ")
