@@ -42,14 +42,6 @@ ROLE_PERMISSIONS: Dict[str, Dict[str, List[str]]] = {
         "payroll": ["read", "compute", "approve", "archive"],
         "reports": ["read", "export"]
     },
-    "SUPERVISOR": {
-        "company_department": ["read_dept"],
-        "personnel": ["read_dept"],
-        "shifts_rosters": ["read", "update_dept", "archive_dept"],
-        "biometrics": ["read_dept"],
-        "leave_ob": ["create", "read_dept", "archive", "endorse_dept"],
-        "reports": ["read_dept"]
-    },
     "EMPLOYEE": {
         "personnel": ["read_self"],
         "shifts_rosters": ["read_self"],

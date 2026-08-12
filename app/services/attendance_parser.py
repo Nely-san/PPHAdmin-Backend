@@ -30,7 +30,9 @@ def normalize_date(cell_value) -> str | None:
     # If it's a pandas Timestamp or datetime object
     if hasattr(cell_value, 'strftime'):
         try:
-            return cell_value.strftime("%Y-%m-%d")
+            val_str = cell_value.strftime("%Y-%m-%d")
+            if int(val_str.split("-")[0]) >= 2000:
+                return val_str
         except:
             pass
 
@@ -40,7 +42,9 @@ def normalize_date(cell_value) -> str | None:
         # Excel date serial numbers for modern dates (1982 to 2064) fall between 30000 and 60000.
         if 30000 <= val_float <= 60000:
             parsed_dt = pd.to_datetime(val_float, unit='D', origin='1899-12-30')
-            return parsed_dt.strftime("%Y-%m-%d")
+            val_str = parsed_dt.strftime("%Y-%m-%d")
+            if int(val_str.split("-")[0]) >= 2000:
+                return val_str
     except:
         pass
 
@@ -58,7 +62,8 @@ def normalize_date(cell_value) -> str | None:
         y = yyyymmdd.group(1)
         m = yyyymmdd.group(2).zfill(2)
         d = yyyymmdd.group(3).zfill(2)
-        return f"{y}-{m}-{d}"
+        if int(y) >= 2000:
+            return f"{y}-{m}-{d}"
 
     # Pattern MM/DD/YYYY or DD/MM/YYYY etc.
     mdys = re.match(r'^(\d{1,2})[-/\.](\d{1,2})[-/\.](\d{2,4})', str_val)
@@ -71,14 +76,21 @@ def normalize_date(cell_value) -> str | None:
         
         month_val = int(m)
         day_val = int(d)
+        res_date = None
         if month_val > 12 and day_val <= 12:
-            return f"{y_val}-{str(day_val).zfill(2)}-{str(month_val).zfill(2)}"
-        return f"{y_val}-{m}-{d}"
+            res_date = f"{y_val}-{str(day_val).zfill(2)}-{str(month_val).zfill(2)}"
+        else:
+            res_date = f"{y_val}-{m}-{d}"
+            
+        if y_val >= 2000:
+            return res_date
 
     # Try parsing as generic date
     try:
         parsed = pd.to_datetime(str_val, errors='raise')
-        return parsed.strftime("%Y-%m-%d")
+        val_str = parsed.strftime("%Y-%m-%d")
+        if int(val_str.split("-")[0]) >= 2000:
+            return val_str
     except:
         pass
 
@@ -187,7 +199,21 @@ async def parse_attendance_excel(file_bytes: bytes, file_name: str, db: Prisma) 
 
                 row_vals = list(row.values)
                 
-                # Try header-based indices first
+                # Scan the row for a date first, whether we have bio_id or not, to update last_parsed_date
+                parsed_date = None
+                if date_idx >= 0 and date_idx < len(row_vals) and pd.notna(row_vals[date_idx]):
+                    parsed_date = normalize_date(row_vals[date_idx])
+                if not parsed_date:
+                    for cell in row_vals:
+                        d_val = normalize_date(cell)
+                        if d_val:
+                            parsed_date = d_val
+                            break
+                if parsed_date:
+                    last_parsed_date = parsed_date
+                    rec_date = parsed_date
+
+                # Try header-based indices
                 if bio_id_idx >= 0 and bio_id_idx < len(row_vals) and pd.notna(row_vals[bio_id_idx]) and str(row_vals[bio_id_idx]).strip().isdigit():
                     bio_id = str(row_vals[bio_id_idx]).strip()
                     if name_idx >= 0 and name_idx < len(row_vals) and pd.notna(row_vals[name_idx]):
@@ -195,10 +221,10 @@ async def parse_attendance_excel(file_bytes: bytes, file_name: str, db: Prisma) 
                     if dept_idx >= 0 and dept_idx < len(row_vals) and pd.notna(row_vals[dept_idx]):
                         dept_name = str(row_vals[dept_idx]).strip()
                     if date_idx >= 0 and date_idx < len(row_vals) and pd.notna(row_vals[date_idx]):
-                        parsed_date = normalize_date(row_vals[date_idx])
-                        if parsed_date:
-                            rec_date = parsed_date
-                            last_parsed_date = parsed_date
+                        parsed_date_specific = normalize_date(row_vals[date_idx])
+                        if parsed_date_specific:
+                            rec_date = parsed_date_specific
+                            last_parsed_date = parsed_date_specific
                     if am_in_idx >= 0 and am_in_idx < len(row_vals) and pd.notna(row_vals[am_in_idx]):
                         am_in = str(row_vals[am_in_idx]).strip()
                     if am_out_idx >= 0 and am_out_idx < len(row_vals) and pd.notna(row_vals[am_out_idx]):
@@ -212,10 +238,10 @@ async def parse_attendance_excel(file_bytes: bytes, file_name: str, db: Prisma) 
                     person_name = current_name or f"Personnel #{current_bio_id}"
                     dept_name = current_dept or "General Operations"
                     if date_idx >= 0 and date_idx < len(row_vals) and pd.notna(row_vals[date_idx]):
-                        parsed_date = normalize_date(row_vals[date_idx])
-                        if parsed_date:
-                            rec_date = parsed_date
-                            last_parsed_date = parsed_date
+                        parsed_date_specific = normalize_date(row_vals[date_idx])
+                        if parsed_date_specific:
+                            rec_date = parsed_date_specific
+                            last_parsed_date = parsed_date_specific
                     if am_in_idx >= 0 and am_in_idx < len(row_vals) and pd.notna(row_vals[am_in_idx]):
                         am_in = str(row_vals[am_in_idx]).strip()
                     if am_out_idx >= 0 and am_out_idx < len(row_vals) and pd.notna(row_vals[am_out_idx]):
@@ -241,20 +267,6 @@ async def parse_attendance_excel(file_bytes: bytes, file_name: str, db: Prisma) 
                             person_name = c2
 
                 if bio_id:
-                    # Fallback cell scanning for the date if not correctly identified yet
-                    parsed_date = None
-                    if date_idx >= 0 and date_idx < len(row_vals) and pd.notna(row_vals[date_idx]):
-                        parsed_date = normalize_date(row_vals[date_idx])
-                    if not parsed_date:
-                        for cell in row_vals:
-                            d_val = normalize_date(cell)
-                            if d_val:
-                                parsed_date = d_val
-                                break
-                    if parsed_date:
-                        rec_date = parsed_date
-                        last_parsed_date = parsed_date
-
                     key = f"{bio_id}_{rec_date}"
                     if key not in account_map:
                         is_late, late_mins = check_tardiness(am_in)

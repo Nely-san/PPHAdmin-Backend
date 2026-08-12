@@ -97,14 +97,7 @@ async def seed():
             }
         )
 
-        supervisor_user = await db.user.create(
-            data={
-                "username": "supervisor",
-                "email": "supervisor@gmail.com",
-                "passwordHash": default_admin_password,
-                "role": Role.SUPERVISOR,
-            }
-        )
+
 
         # Create account entries for staff members
         jerald_user = await db.user.create(
@@ -171,70 +164,9 @@ async def seed():
         )
 
         # ==========================================
-        # 3. CREATE COMPANIES & DEPARTMENTS
+        # 3. CREATE COMPANIES & DEPARTMENTS (Skipped)
         # ==========================================
-        print("[3/10] Creating Companies & Departments...")
-        apex_company = await db.company.create(
-            data={
-                "name": "Apex Real Estate Corp.",
-                "code": "APEX",
-            }
-        )
-
-        nextech_company = await db.company.create(
-            data={
-                "name": "NexTech Digital Solutions",
-                "code": "NEXT",
-            }
-        )
-
-        vanguard_company = await db.company.create(
-            data={
-                "name": "Vanguard Holdings Inc.",
-                "code": "VANG",
-            }
-        )
-
-        # Departments
-        apex_sales_dept = await db.department.create(
-            data={
-                "companyId": apex_company.id,
-                "name": "Real Estate Sales",
-                "code": "SALES",
-            }
-        )
-
-        apex_prop_dept = await db.department.create(
-            data={
-                "companyId": apex_company.id,
-                "name": "Property Management",
-                "code": "PROP",
-            }
-        )
-
-        nextech_dev_dept = await db.department.create(
-            data={
-                "companyId": nextech_company.id,
-                "name": "Software Engineering",
-                "code": "DEV",
-            }
-        )
-
-        nextech_qa_dept = await db.department.create(
-            data={
-                "companyId": nextech_company.id,
-                "name": "Quality Assurance",
-                "code": "QA",
-            }
-        )
-
-        nextech_design_dept = await db.department.create(
-            data={
-                "companyId": nextech_company.id,
-                "name": "UI/UX Design",
-                "code": "DESIGN",
-            }
-        )
+        print("[3/10] Skipped creating companies & departments (Disabled)...")
 
         # ==========================================
         # 4. CREATE SHIFTS
@@ -292,8 +224,6 @@ async def seed():
                 "baseRate": Decimal("35000.00"),
                 "dateStarted": datetime(2024, 1, 15, tzinfo=timezone.utc),
                 "status": PersonStatus.ACTIVE,
-                "companyId": nextech_company.id,
-                "departmentId": nextech_dev_dept.id,
                 "userId": jerald_user.id,
             }
         )
@@ -309,8 +239,6 @@ async def seed():
                 "baseRate": Decimal("850.00"),
                 "dateStarted": datetime(2024, 3, 1, tzinfo=timezone.utc),
                 "status": PersonStatus.ACTIVE,
-                "companyId": apex_company.id,
-                "departmentId": apex_sales_dept.id,
                 "userId": chabs_user.id,
             }
         )
@@ -326,8 +254,6 @@ async def seed():
                 "baseRate": Decimal("28000.00"),
                 "dateStarted": datetime(2024, 6, 1, tzinfo=timezone.utc),
                 "status": PersonStatus.ACTIVE,
-                "companyId": nextech_company.id,
-                "departmentId": nextech_qa_dept.id,
                 "userId": famela_user.id,
             }
         )
@@ -343,8 +269,6 @@ async def seed():
                 "baseRate": Decimal("750.00"),
                 "dateStarted": datetime(2025, 2, 1, tzinfo=timezone.utc),
                 "status": PersonStatus.ACTIVE,
-                "companyId": apex_company.id,
-                "departmentId": apex_prop_dept.id,
             }
         )
 
@@ -359,8 +283,6 @@ async def seed():
                 "baseRate": Decimal("0.00"),
                 "dateStarted": datetime(2026, 6, 1, tzinfo=timezone.utc),
                 "status": PersonStatus.ACTIVE,
-                "companyId": nextech_company.id,
-                "departmentId": nextech_dev_dept.id,
                 "userId": alex_ojt_user.id,
                 "schoolName": "Polytechnic University of the Philippines",
                 "coordinatorContact": "Prof. Garcia (0917-123-4567)",
@@ -380,8 +302,6 @@ async def seed():
                 "baseRate": Decimal("0.00"),
                 "dateStarted": datetime(2026, 6, 15, tzinfo=timezone.utc),
                 "status": PersonStatus.ACTIVE,
-                "companyId": nextech_company.id,
-                "departmentId": nextech_design_dept.id,
                 "userId": maria_ojt_user.id,
                 "schoolName": "Technological University of the Philippines",
                 "coordinatorContact": "Dr. Reyes (0918-987-6543)",
@@ -776,7 +696,6 @@ async def seed():
             admin_user,
             hr_admin_user,
             payroll_officer_user,
-            supervisor_user,
             jerald_user,
             chabs_user,
             famela_user,
@@ -864,25 +783,7 @@ async def seed():
                 "actionUrl": "payroll",
                 "createdAt": datetime(2026, 7, 14, 17, 15, 0, tzinfo=timezone.utc),
             },
-            # Supervisor Notifications
-            {
-                "userId": supervisor_user.id,
-                "title": "Abnormal Clocking Review",
-                "message": "Pending abnormal clocking request from Chabs Santos (July 3, 2026) requires your approval.",
-                "category": "ATTENDANCE",
-                "priority": NotificationPriority.HIGH,
-                "actionUrl": "team-exceptions",
-                "createdAt": datetime(2026, 7, 3, 9, 5, 0, tzinfo=timezone.utc),
-            },
-            {
-                "userId": supervisor_user.id,
-                "title": "OJT Milestone Reached",
-                "message": "Alex Rivera has rendered 80.00 hours during the latest cutoff (Total: 184.50 / 500.00 hours).",
-                "category": "OJT",
-                "priority": NotificationPriority.LOW,
-                "actionUrl": "team-attendance",
-                "createdAt": datetime(2026, 7, 14, 17, 0, 0, tzinfo=timezone.utc),
-            },
+
             # Employee: Jerald Cruz
             {
                 "userId": jerald_user.id,
@@ -993,7 +894,6 @@ async def seed():
         print("  Admin       : admin / Admin@123")
         print("  HR Manager  : hradmin / Admin@123")
         print("  Payroll     : payroll / Admin@123")
-        print("  Supervisor  : supervisor / Admin@123")
         print("  Employee    : jerald / User@123 (Monthly Rate)")
         print("  Employee    : chabs / User@123 (Daily Rate)")
         print("  Employee    : famela / User@123 (Monthly Rate)")
