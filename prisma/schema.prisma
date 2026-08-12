@@ -445,3 +445,30 @@ model NotificationPreference {
 
   @@map("notification_preferences")
 }
+
+model AuditLog {
+  id        String   @id @default(uuid())
+  tableName String   @map("table_name")
+  recordId  String   @map("record_id")
+  action    String
+  oldData   String?  @map("old_data") @db.Text
+  newData   String?  @map("new_data") @db.Text
+  changedBy String   @map("changed_by")
+  createdAt DateTime @default(now()) @map("created_at")
+
+  @@map("audit_logs")
+}
+
+model SystemParameter {
+  id          String   @id @default(uuid())
+  key         String   @unique
+  value       String   @db.Text
+  description String?  @db.Text
+  category    String   @default("GENERAL") // GENERAL, ATTENDANCE, PAYROLL, SECURITY
+  createdAt   DateTime @default(now()) @map("created_at")
+  updatedAt   DateTime @updatedAt @map("updated_at")
+
+  @@map("system_parameters")
+}
+
+

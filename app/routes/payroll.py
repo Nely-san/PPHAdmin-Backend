@@ -3,11 +3,18 @@ from app.core.database import get_db
 from app.models.payroll import PayrollRecordResponse, PayrollGenerateRequest
 from app.services.payroll_engine import compute_payroll_cutoff
 from prisma import Prisma
+from app.routes.auth import get_current_user
+from app.models.auth import UserProfile
+from app.services.audit_logger import log_audit_action
 
 router = APIRouter()
 
 @router.post("/generate", response_model=list[PayrollRecordResponse])
-async def generate_payroll_draft(payload: PayrollGenerateRequest, db: Prisma = Depends(get_db)):
+async def generate_payroll_draft(
+    payload: PayrollGenerateRequest,
+    db: Prisma = Depends(get_db),
+    current_user: UserProfile = Depends(get_current_user)
+):
     """
     Triggers cutoff payroll calculations for the specified dates and entities.
     """
@@ -31,6 +38,21 @@ async def generate_payroll_draft(payload: PayrollGenerateRequest, db: Prisma = D
                 ),
                 db
             )
+            
+    # Audit log
+    await log_audit_action(
+        table_name="payroll_records",
+        record_id=f"cutoff_{payload.cutoff_start}_to_{payload.cutoff_end}",
+        action="GENERATE",
+        old_data=None,
+        new_data={
+            "cutoffStart": payload.cutoff_start,
+            "cutoffEnd": payload.cutoff_end,
+            "recordsCount": len(records)
+        },
+        changed_by=current_user.username,
+        db=db
+    )
             
     return records
 

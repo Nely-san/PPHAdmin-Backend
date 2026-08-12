@@ -8,6 +8,7 @@ from app.core.database import get_db
 from app.routes.auth import get_current_user
 from app.models.auth import UserProfile, PersonDetail
 from app.core.security import get_password_hash
+from app.services.audit_logger import log_audit_action
 
 router = APIRouter()
 
@@ -147,6 +148,17 @@ async def create_user(
         where={"id": new_user.id},
         include={"person": {"include": {"company": True, "department": True}}}
     )
+    
+    await log_audit_action(
+        table_name="users",
+        record_id=new_user.id,
+        action="CREATE",
+        old_data=None,
+        new_data=reloaded_user,
+        changed_by=current_user.username,
+        db=db
+    )
+    
     return format_user_response(reloaded_user)
 
 @router.put("/{user_id}", response_model=UserResponse)
@@ -215,6 +227,23 @@ async def update_user(
         where={"id": user_id},
         include={"person": {"include": {"company": True, "department": True}}}
     )
+    
+    action_type = "UPDATE"
+    if data.isArchived is True and not user.isArchived:
+        action_type = "ARCHIVE"
+    elif data.isArchived is False and user.isArchived:
+        action_type = "RESTORE"
+
+    await log_audit_action(
+        table_name="users",
+        record_id=user_id,
+        action=action_type,
+        old_data=user,
+        new_data=reloaded_user,
+        changed_by=current_user.username,
+        db=db
+    )
+    
     return format_user_response(reloaded_user)
 
 @router.delete("/{user_id}", response_model=UserResponse)
@@ -243,5 +272,16 @@ async def archive_user(
         where={"id": user_id},
         include={"person": {"include": {"company": True, "department": True}}}
     )
+    
+    await log_audit_action(
+        table_name="users",
+        record_id=user_id,
+        action="ARCHIVE",
+        old_data=user,
+        new_data=reloaded_user,
+        changed_by=current_user.username,
+        db=db
+    )
+    
     return format_user_response(reloaded_user)
 

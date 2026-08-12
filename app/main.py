@@ -3,7 +3,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from app.core.config import settings
 from app.core.database import prisma
-from app.routes import auth, persons, attendance, payroll, companies, users, adjustments, notifications
+from app.routes import auth, persons, attendance, payroll, companies, users, adjustments, notifications, audit_logs, system_parameters
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -40,6 +40,8 @@ app.include_router(payroll.router, prefix="/api/payroll", tags=["Payroll Calcula
 app.include_router(adjustments.router, prefix="/api/payroll/adjustments", tags=["Payroll Adjustments"])
 app.include_router(companies.router, prefix="/api/companies", tags=["Companies"])
 app.include_router(notifications.router, prefix="/api/notifications", tags=["Notifications"])
+app.include_router(audit_logs.router, prefix="/api/audit-logs", tags=["System Audit Logs"])
+app.include_router(system_parameters.router, prefix="/api/system-parameters", tags=["System Parameters"])
 
 @app.get("/")
 def read_root():

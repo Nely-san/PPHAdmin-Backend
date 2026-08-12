@@ -12,6 +12,7 @@ from app.models.person import (
 )
 from app.routes.auth import get_current_user
 from app.models.auth import UserProfile
+from app.services.audit_logger import log_audit_action
 
 router = APIRouter()
 
@@ -95,7 +96,11 @@ async def get_person(person_id: str, db: Prisma = Depends(get_db)):
     return format_person_response(person)
 
 @router.post("/", response_model=PersonDetailResponse, status_code=status.HTTP_201_CREATED)
-async def create_person(payload: PersonCreateRequest, db: Prisma = Depends(get_db)):
+async def create_person(
+    payload: PersonCreateRequest,
+    current_user: UserProfile = Depends(get_current_user),
+    db: Prisma = Depends(get_db)
+):
     """
     Create a new employee or OJT intern profile.
     """
@@ -151,6 +156,17 @@ async def create_person(payload: PersonCreateRequest, db: Prisma = Depends(get_d
         where={"id": created.id},
         include={"company": True, "department": True}
     )
+    
+    await log_audit_action(
+        table_name="persons",
+        record_id=created.id,
+        action="CREATE",
+        old_data=None,
+        new_data=reloaded,
+        changed_by=current_user.username,
+        db=db
+    )
+    
     return format_person_response(reloaded)
 
 @router.put("/{person_id}", response_model=PersonDetailResponse)
@@ -268,10 +284,26 @@ async def update_person(
         where={"id": updated.id},
         include={"company": True, "department": True}
     )
+
+    await log_audit_action(
+        table_name="persons",
+        record_id=person_id,
+        action="UPDATE",
+        old_data=existing,
+        new_data=reloaded,
+        changed_by=current_user.username,
+        db=db
+    )
+    
     return format_person_response(reloaded)
 
 @router.patch("/{person_id}/ojt-hours", response_model=PersonDetailResponse)
-async def update_ojt_hours(person_id: str, payload: QuickOjtHoursRequest, db: Prisma = Depends(get_db)):
+async def update_ojt_hours(
+    person_id: str,
+    payload: QuickOjtHoursRequest,
+    current_user: UserProfile = Depends(get_current_user),
+    db: Prisma = Depends(get_db)
+):
     """
     Add rendered OJT hours to a trainee's total progress.
     """
@@ -291,11 +323,26 @@ async def update_ojt_hours(person_id: str, payload: QuickOjtHoursRequest, db: Pr
         where={"id": updated.id},
         include={"company": True, "department": True}
     )
+    
+    await log_audit_action(
+        table_name="persons",
+        record_id=person_id,
+        action="UPDATE",
+        old_data=existing,
+        new_data=reloaded,
+        changed_by=current_user.username,
+        db=db
+    )
+    
     return format_person_response(reloaded)
 
 @router.delete("/{person_id}", response_model=PersonDetailResponse)
 @router.patch("/{person_id}/archive", response_model=PersonDetailResponse)
-async def archive_person(person_id: str, db: Prisma = Depends(get_db)):
+async def archive_person(
+    person_id: str,
+    current_user: UserProfile = Depends(get_current_user),
+    db: Prisma = Depends(get_db)
+):
     """
     Archive a person record instead of permanently deleting it.
     """
@@ -311,11 +358,26 @@ async def archive_person(person_id: str, db: Prisma = Depends(get_db)):
         where={"id": updated.id},
         include={"company": True, "department": True}
     )
+    
+    await log_audit_action(
+        table_name="persons",
+        record_id=person_id,
+        action="ARCHIVE",
+        old_data=existing,
+        new_data=reloaded,
+        changed_by=current_user.username,
+        db=db
+    )
+    
     return format_person_response(reloaded)
 
 @router.patch("/{person_id}/unarchive", response_model=PersonDetailResponse)
 @router.patch("/{person_id}/restore", response_model=PersonDetailResponse)
-async def unarchive_person(person_id: str, db: Prisma = Depends(get_db)):
+async def unarchive_person(
+    person_id: str,
+    current_user: UserProfile = Depends(get_current_user),
+    db: Prisma = Depends(get_db)
+):
     """
     Unarchive / restore an archived person record back to ACTIVE status.
     """
@@ -332,4 +394,15 @@ async def unarchive_person(person_id: str, db: Prisma = Depends(get_db)):
         where={"id": updated.id},
         include={"company": True, "department": True}
     )
+    
+    await log_audit_action(
+        table_name="persons",
+        record_id=person_id,
+        action="RESTORE",
+        old_data=existing,
+        new_data=reloaded,
+        changed_by=current_user.username,
+        db=db
+    )
+    
     return format_person_response(reloaded)

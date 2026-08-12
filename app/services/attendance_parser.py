@@ -119,7 +119,6 @@ async def parse_attendance_excel(file_bytes: bytes, file_name: str, db: Prisma) 
     Service to parse biometric .xls/.xlsx files and import attendance logs for ALL 72+ accounts.
     """
     batch_id = f"BATCH-IMPORT-{uuid.uuid4().hex[:8].upper()}"
-    today_str = datetime.now().strftime("%Y-%m-%d")
     
     imported_logs = []
     anomalies_count = 0
@@ -134,7 +133,7 @@ async def parse_attendance_excel(file_bytes: bytes, file_name: str, db: Prisma) 
             current_bio_id = None
             current_name = None
             current_dept = None
-            last_parsed_date = today_str
+            last_parsed_date = None
 
             # Detect Column Headers
             bio_id_idx = -1
@@ -182,10 +181,12 @@ async def parse_attendance_excel(file_bytes: bytes, file_name: str, db: Prisma) 
 
                 if bio_match:
                     current_bio_id = bio_match.group(1).strip()
-                if name_match:
-                    current_name = name_match.group(1).strip()
-                if dept_match:
-                    current_dept = dept_match.group(1).strip()
+                    if name_match:
+                        current_name = name_match.group(1).strip()
+                    if dept_match:
+                        current_dept = dept_match.group(1).strip()
+                    last_parsed_date = None
+                    continue
 
                 # Extract numeric ID, Name, Date, and Times from row values
                 bio_id = None
@@ -266,7 +267,7 @@ async def parse_attendance_excel(file_bytes: bytes, file_name: str, db: Prisma) 
                             bio_id = c1
                             person_name = c2
 
-                if bio_id:
+                if bio_id and rec_date:
                     key = f"{bio_id}_{rec_date}"
                     if key not in account_map:
                         is_late, late_mins = check_tardiness(am_in)

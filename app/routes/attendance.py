@@ -3,11 +3,18 @@ from app.core.database import get_db
 from app.models.attendance import AttendanceLogResponse, AttendanceImportResponse
 from app.services.attendance_parser import parse_attendance_excel
 from prisma import Prisma
+from app.routes.auth import get_current_user
+from app.models.auth import UserProfile
+from app.services.audit_logger import log_audit_action
 
 router = APIRouter()
 
 @router.post("/import", response_model=AttendanceImportResponse)
-async def import_biometric_data(file: UploadFile = File(...), db: Prisma = Depends(get_db)):
+async def import_biometric_data(
+    file: UploadFile = File(...),
+    db: Prisma = Depends(get_db),
+    current_user: UserProfile = Depends(get_current_user)
+):
     """
     Upload and parse biometric timecard exports (.xls/.xlsx).
     """
@@ -20,6 +27,23 @@ async def import_biometric_data(file: UploadFile = File(...), db: Prisma = Depen
     contents = await file.read()
     # Call parser service
     results = await parse_attendance_excel(contents, file.filename, db)
+    
+    # Log Audit
+    await log_audit_action(
+        table_name="biometric_import_batches",
+        record_id=results.batch_id,
+        action="IMPORT",
+        old_data=None,
+        new_data={
+            "fileName": results.file_name,
+            "recordsImported": results.records_imported,
+            "anomaliesDetected": results.anomalies_detected,
+            "totalProcessed": results.total_processed,
+        },
+        changed_by=current_user.username,
+        db=db
+    )
+    
     return results
 
 @router.get("/", response_model=list[dict])
@@ -76,7 +100,10 @@ async def get_attendance_logs(db: Prisma = Depends(get_db)):
     return frontend_logs
 
 @router.post("/reset")
-async def reset_attendance_and_imported_persons(db: Prisma = Depends(get_db)):
+async def reset_attendance_and_imported_persons(
+    db: Prisma = Depends(get_db),
+    current_user: UserProfile = Depends(get_current_user)
+):
     """
     Reset biometric attendance records and clean out imported biometric personnel accounts from database.
     """
@@ -96,6 +123,16 @@ async def reset_attendance_and_imported_persons(db: Prisma = Depends(get_db)):
         )
     except Exception as e:
         print(f"Delete imported persons notice: {e}")
+
+    await log_audit_action(
+        table_name="attendance_records",
+        record_id="all",
+        action="RESET",
+        old_data={"message": "All biometric records and imported accounts"},
+        new_data=None,
+        changed_by=current_user.username,
+        db=db
+    )
 
     return {"status": "success", "message": "Biometric attendance records and imported accounts reset cleanly."}
 

@@ -1,6 +1,7 @@
 import asyncio
 import os
 import sys
+import json
 from datetime import datetime, date, timezone, timedelta
 from decimal import Decimal
 
@@ -885,6 +886,129 @@ async def seed():
 
         for notif in notifications_data:
             await db.notification.create(data=notif)
+
+        # ==========================================
+        # 11. CREATE AUDIT LOGS (NEW)
+        # ==========================================
+        print("[11/10] Seeding System Audit Logs...")
+        await db.auditlog.delete_many() # Clear existing logs
+        
+        audit_logs_data = [
+            # 1. Super Admin creates an Employee account (Jerald)
+            {
+                "tableName": "users",
+                "recordId": jerald_user.id,
+                "action": "CREATE",
+                "oldData": None,
+                "newData": json.dumps({
+                    "id": jerald_user.id,
+                    "username": "jerald",
+                    "email": "jerald.cruz@gmail.com",
+                    "role": "EMPLOYEE",
+                    "isArchived": False
+                }),
+                "changedBy": "superadmin",
+                "createdAt": datetime(2026, 7, 1, 9, 0, 0, tzinfo=timezone.utc),
+            },
+            # 2. Admin creates employee profile (Chabs Santos)
+            {
+                "tableName": "persons",
+                "recordId": chabs_person.id,
+                "action": "CREATE",
+                "oldData": None,
+                "newData": json.dumps({
+                    "id": chabs_person.id,
+                    "name": "Chabs Santos",
+                    "personType": "EMPLOYEE",
+                    "employmentMode": "FULL_TIME",
+                    "rateType": "DAILY",
+                    "baseRate": 850.00,
+                    "status": "ACTIVE",
+                    "userId": chabs_user.id
+                }),
+                "changedBy": "admin",
+                "createdAt": datetime(2026, 7, 1, 10, 15, 0, tzinfo=timezone.utc),
+            },
+            # 3. HR Admin updates Jerald Cruz base salary rate (Merit promotion)
+            {
+                "tableName": "persons",
+                "recordId": jerald_person.id,
+                "action": "UPDATE",
+                "oldData": json.dumps({
+                    "id": jerald_person.id,
+                    "name": "Jerald Cruz",
+                    "personType": "EMPLOYEE",
+                    "baseRate": 25000.00,
+                    "rateType": "MONTHLY",
+                    "status": "ACTIVE"
+                }),
+                "newData": json.dumps({
+                    "id": jerald_person.id,
+                    "name": "Jerald Cruz",
+                    "personType": "EMPLOYEE",
+                    "baseRate": 27500.00,
+                    "rateType": "MONTHLY",
+                    "status": "ACTIVE"
+                }),
+                "changedBy": "hradmin",
+                "createdAt": datetime(2026, 7, 12, 14, 30, 0, tzinfo=timezone.utc),
+            },
+            # 4. Biometric spreadsheet imports log
+            {
+                "tableName": "biometric_import_batches",
+                "recordId": "batch-cutoff-jul-1",
+                "action": "IMPORT",
+                "oldData": None,
+                "newData": json.dumps({
+                    "fileName": "07Statistic_July_1_14.xls",
+                    "recordsImported": 124,
+                    "anomaliesDetected": 3,
+                    "totalProcessed": 124
+                }),
+                "changedBy": "hradmin",
+                "createdAt": datetime(2026, 7, 14, 17, 30, 0, tzinfo=timezone.utc),
+            },
+            # 5. Payroll Officer generates draft payroll cutoff
+            {
+                "tableName": "payroll_records",
+                "recordId": "cutoff_2026-07-01_to_2026-07-14",
+                "action": "GENERATE",
+                "oldData": None,
+                "newData": json.dumps({
+                    "cutoffStart": "2026-07-01",
+                    "cutoffEnd": "2026-07-14",
+                    "recordsCount": 6,
+                    "grossTotal": 145000.00,
+                    "deductionsTotal": 4200.00,
+                    "netTotal": 140800.00
+                }),
+                "changedBy": "payroll",
+                "createdAt": datetime(2026, 7, 15, 10, 0, 0, tzinfo=timezone.utc),
+            },
+            # 6. Admin archives David Tan OJT (Completed/Finished)
+            {
+                "tableName": "persons",
+                "recordId": david_ojt_person.id,
+                "action": "ARCHIVE",
+                "oldData": json.dumps({
+                    "id": david_ojt_person.id,
+                    "name": "David Tan",
+                    "personType": "OJT",
+                    "status": "ACTIVE"
+                }),
+                "newData": json.dumps({
+                    "id": david_ojt_person.id,
+                    "name": "David Tan",
+                    "personType": "OJT",
+                    "status": "ARCHIVED"
+                }),
+                "changedBy": "admin",
+                "createdAt": datetime(2026, 7, 16, 11, 20, 0, tzinfo=timezone.utc),
+            }
+        ]
+
+        for audit in audit_logs_data:
+            await db.auditlog.create(data=audit)
 
         print("\n==================================================")
         print("   Database Seeding Completed Successfully!       ")
