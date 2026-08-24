@@ -10,7 +10,8 @@ from users.serializers import (
     PagePermissionSerializer, 
     UserProfileSerializer,
     PersonDetailSerializer,
-    CustomTokenObtainPairSerializer
+    CustomTokenObtainPairSerializer,
+    RegisterSerializer
 )
 
 class RoleViewSet(viewsets.ModelViewSet):
@@ -127,6 +128,32 @@ class PersonViewSet(viewsets.ModelViewSet):
 
 class CustomLoginView(TokenObtainPairView):
     serializer_class = CustomTokenObtainPairSerializer
+
+
+@api_view(['POST'])
+@permission_classes([permissions.AllowAny])
+def register_view(request):
+    """
+    Public registration endpoint for new users.
+    Accepts username, email, and password.
+    """
+    serializer = RegisterSerializer(data=request.data)
+    if serializer.is_valid():
+        user = serializer.save()
+        response_serializer = UserProfileSerializer(user)
+        return Response(response_serializer.data, status=status.HTTP_201_CREATED)
+    
+    errors = serializer.errors
+    error_messages = []
+    for field, field_errors in errors.items():
+        if isinstance(field_errors, list):
+            error_messages.append(f"{field.capitalize()}: {field_errors[0]}")
+        else:
+            error_messages.append(f"{field.capitalize()}: {field_errors}")
+    return Response(
+        {"detail": " ".join(error_messages), "errors": errors},
+        status=status.HTTP_400_BAD_REQUEST
+    )
 
 
 @api_view(['GET'])

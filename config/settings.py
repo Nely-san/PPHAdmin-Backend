@@ -82,10 +82,7 @@ SIMPLE_JWT = {
 CORS_ALLOW_ALL_ORIGINS = True
 
 CORS_ALLOWED_ORIGINS = [
-    'https://profile.philippinepropertyhomes.com',
-    'https://management.philippinepropertyhomes.com',
-    'http://localhost:8080', 'http://localhost:8081', 
-    'http://localhost:8082', 'http://localhost:8083',
+    'http://localhost:8080',
     'http://localhost:5173', 'http://localhost:5174',
     'http://127.0.0.1:5173', 'http://127.0.0.1:5174'
 ]

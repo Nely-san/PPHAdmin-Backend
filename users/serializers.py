@@ -144,6 +144,96 @@ class CustomTokenObtainPairSerializer(TokenObtainPairSerializer):
         return token
 
     def validate(self, attrs):
+        # Support login via either username or email
+        username_or_email = attrs.get('username', '')
+        if username_or_email:
+            user_obj = User.objects.filter(username=username_or_email).first()
+            if not user_obj:
+                user_obj = User.objects.filter(email__iexact=username_or_email).first()
+            if user_obj:
+                attrs['username'] = user_obj.username
         data = super().validate(attrs)
         data['user'] = UserProfileSerializer(self.user).data
         return data
+
+
+class RegisterSerializer(serializers.ModelSerializer):
+    username = serializers.CharField(
+        min_length=3,
+        max_length=150,
+        required=True,
+        error_messages={
+            'blank': 'Username cannot be blank.',
+            'min_length': 'Username must be at least 3 characters long.',
+            'required': 'Username is required.'
+        }
+    )
+    email = serializers.EmailField(
+        required=True,
+        error_messages={
+            'blank': 'Email cannot be blank.',
+            'invalid': 'Please enter a valid email address.',
+            'required': 'Email is required.'
+        }
+    )
+    password = serializers.CharField(
+        write_only=True,
+        min_length=6,
+        required=True,
+        error_messages={
+            'blank': 'Password cannot be blank.',
+            'min_length': 'Password must be at least 6 characters long.',
+            'required': 'Password is required.'
+        }
+    )
+
+    class Meta:
+        model = User
+        fields = ['id', 'username', 'email', 'password']
+
+    def validate_username(self, value):
+        val = value.strip()
+        if not val:
+            raise serializers.ValidationError("Username cannot be empty.")
+        if User.objects.filter(username__iexact=val).exists():
+            raise serializers.ValidationError("A user with this username already exists.")
+        return val
+
+    def validate_email(self, value):
+        val = value.strip().lower()
+        if not val:
+            raise serializers.ValidationError("Email cannot be empty.")
+        if User.objects.filter(email__iexact=val).exists():
+            raise serializers.ValidationError("A user with this email address already exists.")
+        return val
+
+    def create(self, validated_data):
+        username = validated_data['username'].strip()
+        email = validated_data['email'].strip().lower()
+        password = validated_data['password']
+
+        employee_role = Role.objects.filter(code='EMPLOYEE').first()
+
+        user = User.objects.create(
+            username=username,
+            email=email,
+            role=employee_role,
+            is_active=True,
+            is_staff=False,
+            is_archived=False
+        )
+        user.set_password(password)
+        user.save()
+
+        # Link or create a Person profile
+        Person.objects.create(
+            user=user,
+            name=username,
+            person_type='EMPLOYEE',
+            employment_mode='FULL_TIME',
+            rate_type='DAILY',
+            base_rate=0.00,
+            status='ACTIVE'
+        )
+
+        return user
