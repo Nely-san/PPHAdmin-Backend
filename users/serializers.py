@@ -88,6 +88,12 @@ class UserProfileSerializer(serializers.ModelSerializer):
             return list(PagePermission.objects.values_list('code', flat=True))
         return list(obj.role.permissions.values_list('code', flat=True))
 
+    def to_internal_value(self, data):
+        ret = super().to_internal_value(data)
+        if 'role' in data and 'role_code' not in ret and 'role' not in ret:
+            ret['role_code'] = data['role']
+        return ret
+
     def validate(self, attrs):
         # Prevent editing role or archiving the Super Admin account
         if self.instance and self.instance.role and self.instance.role.code == 'SUPER_ADMIN':

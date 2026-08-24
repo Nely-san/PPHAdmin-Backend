@@ -20,6 +20,7 @@ class RoleViewSet(viewsets.ModelViewSet):
     queryset = Role.objects.filter(is_archived=False)
     serializer_class = RoleSerializer
     permission_classes = [permissions.IsAuthenticated]
+    pagination_class = None
 
     def destroy(self, request, *args, **kwargs):
         role = self.get_object()
@@ -49,6 +50,7 @@ class UserViewSet(viewsets.ModelViewSet):
     queryset = User.objects.all()
     serializer_class = UserProfileSerializer
     permission_classes = [permissions.IsAuthenticated]
+    pagination_class = None
 
     def get_queryset(self):
         qs = User.objects.all()
@@ -92,6 +94,7 @@ class PersonViewSet(viewsets.ModelViewSet):
     queryset = Person.objects.filter(is_archived=False)
     serializer_class = PersonDetailSerializer
     permission_classes = [permissions.IsAuthenticated]
+    pagination_class = None
 
     def get_queryset(self):
         qs = Person.objects.all()

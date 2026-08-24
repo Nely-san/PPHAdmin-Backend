@@ -11,6 +11,7 @@ class CompanyViewSet(viewsets.ModelViewSet):
     queryset = Company.objects.filter(is_archived=False)
     serializer_class = CompanySerializer
     permission_classes = [permissions.IsAuthenticated]
+    pagination_class = None
 
     @action(detail=False, methods=['get'], url_path='org-tree')
     def org_tree(self, request):
@@ -44,6 +45,7 @@ class DepartmentViewSet(viewsets.ModelViewSet):
     queryset = Department.objects.filter(is_archived=False)
     serializer_class = DepartmentSerializer
     permission_classes = [permissions.IsAuthenticated]
+    pagination_class = None
 
     def destroy(self, request, *args, **kwargs):
         department = self.get_object()
