@@ -26,13 +26,16 @@ class UserProfileSerializer(serializers.ModelSerializer):
     )
     person = PersonDetailSerializer(read_only=True)
     password = serializers.CharField(write_only=True, required=False)
+    custom_permissions = PagePermissionSerializer(many=True, read_only=True)
+    approved_by_username = serializers.CharField(source='approved_by.username', read_only=True)
 
     class Meta:
         model = User
         fields = [
             'id', 'username', 'email', 'role', 'role_detail', 'allowed_pages', 
             'role_code', 'role_id', 'person', 'password', 'is_active', 'is_staff', 
-            'is_archived', 'created_at'
+            'approval_status', 'rejection_reason', 'approved_by', 'approved_by_username',
+            'approved_at', 'custom_permissions', 'is_archived', 'created_at'
         ]
 
     def get_role(self, obj):
@@ -40,10 +43,12 @@ class UserProfileSerializer(serializers.ModelSerializer):
 
     def get_allowed_pages(self, obj):
         if not obj.role:
-            return []
+            return list(obj.custom_permissions.values_list('code', flat=True))
         if obj.role.code == 'SUPER_ADMIN':
             return list(PagePermission.objects.values_list('code', flat=True))
-        return list(obj.role.permissions.values_list('code', flat=True))
+        role_pages = set(obj.role.permissions.values_list('code', flat=True))
+        custom_pages = set(obj.custom_permissions.values_list('code', flat=True))
+        return list(role_pages | custom_pages)
 
     def to_internal_value(self, data):
         ret = super().to_internal_value(data)
@@ -71,6 +76,9 @@ class UserProfileSerializer(serializers.ModelSerializer):
             role = Role.objects.filter(code=role_code).first()
             if role:
                 validated_data['role'] = role
+        # Admins creating users explicitly via dashboard default to APPROVED and active
+        validated_data.setdefault('approval_status', 'APPROVED')
+        validated_data.setdefault('is_active', True)
         user = User.objects.create(**validated_data)
         if password:
             user.set_password(password)
@@ -101,15 +109,51 @@ class CustomTokenObtainPairSerializer(TokenObtainPairSerializer):
         return token
 
     def validate(self, attrs):
-        # Support login via either username or email
         username_or_email = attrs.get('username', '')
+        password = attrs.get('password', '')
+
+        # Support login via either username or email
+        user_obj = None
         if username_or_email:
-            user_obj = User.objects.filter(username=username_or_email).first()
+            user_obj = User.objects.filter(username__iexact=username_or_email).first()
             if not user_obj:
                 user_obj = User.objects.filter(email__iexact=username_or_email).first()
             if user_obj:
                 attrs['username'] = user_obj.username
+
+        # If user exists and password is verified, provide explicit status checks
+        if user_obj and password and user_obj.check_password(password):
+            if user_obj.is_archived:
+                raise serializers.ValidationError({
+                    "detail": "This account has been archived. Please contact an administrator."
+                })
+            if user_obj.approval_status == 'PENDING' or not user_obj.is_active:
+                if user_obj.approval_status == 'PENDING':
+                    raise serializers.ValidationError({
+                        "detail": "Your account registration is pending approval. You cannot log in until an administrator approves your account."
+                    })
+                elif user_obj.approval_status == 'REJECTED':
+                    reason = f" Reason: {user_obj.rejection_reason}" if user_obj.rejection_reason else ""
+                    raise serializers.ValidationError({
+                        "detail": f"Your account registration has been rejected.{reason}"
+                    })
+                else:
+                    raise serializers.ValidationError({
+                        "detail": "Your account is currently inactive. You cannot log in until it is activated."
+                    })
+            if user_obj.approval_status != 'APPROVED':
+                raise serializers.ValidationError({
+                    "detail": "Your account is not approved. You cannot log in until an administrator approves your account."
+                })
+
         data = super().validate(attrs)
+
+        # Safety check on authenticated user
+        if not self.user.is_active or self.user.approval_status != 'APPROVED':
+            raise serializers.ValidationError({
+                "detail": "Your account registration is pending approval. You cannot log in until an administrator approves your account."
+            })
+
         data['user'] = UserProfileSerializer(self.user).data
         return data
 
@@ -175,7 +219,8 @@ class RegisterSerializer(serializers.ModelSerializer):
             username=username,
             email=email,
             role=employee_role,
-            is_active=True,
+            approval_status='PENDING',
+            is_active=False,
             is_staff=False,
             is_archived=False
         )
@@ -194,3 +239,29 @@ class RegisterSerializer(serializers.ModelSerializer):
         )
 
         return user
+
+
+class AccountApprovalSerializer(serializers.Serializer):
+    """
+    Serializer for handling account review, approval with role/page assignment, or rejection.
+    """
+    action = serializers.ChoiceField(choices=['APPROVE', 'REJECT'])
+    role_code = serializers.CharField(required=False, allow_null=True)
+    role_id = serializers.UUIDField(required=False, allow_null=True)
+    page_codes = serializers.ListField(
+        child=serializers.CharField(), required=False, allow_empty=True
+    )
+    rejection_reason = serializers.CharField(required=False, allow_blank=True, allow_null=True)
+
+    def validate(self, attrs):
+        action = attrs.get('action')
+        if action == 'REJECT' and not attrs.get('rejection_reason'):
+            raise serializers.ValidationError({
+                "rejection_reason": "A rejection reason is required when rejecting an account."
+            })
+        if action == 'APPROVE' and not attrs.get('role_code') and not attrs.get('role_id'):
+            raise serializers.ValidationError({
+                "role": "A role must be assigned when approving an account."
+            })
+        return attrs
+

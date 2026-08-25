@@ -1,3 +1,4 @@
+from django.utils import timezone
 from rest_framework import viewsets, permissions, status
 from rest_framework.views import APIView
 from rest_framework.decorators import action, api_view, permission_classes
@@ -5,18 +6,20 @@ from rest_framework.response import Response
 from rest_framework_simplejwt.views import TokenObtainPairView
 from rest_framework_simplejwt.tokens import RefreshToken
 
-from users.models import User, Person
+from users.models import User, Person, Role, PagePermission
 from users.serializers import (
     UserProfileSerializer,
     PersonDetailSerializer,
     CustomTokenObtainPairSerializer,
-    RegisterSerializer
+    RegisterSerializer,
+    AccountApprovalSerializer
 )
 
 
 class UserViewSet(viewsets.ModelViewSet):
     """
-    User account management with Single Super Admin and Undeletable Super Admin protections.
+    User account management with Single Super Admin, Undeletable Super Admin protections,
+    and Account Review & Approval Lifecycle.
     """
     queryset = User.objects.all()
     serializer_class = UserProfileSerializer
@@ -28,6 +31,11 @@ class UserViewSet(viewsets.ModelViewSet):
         include_archived = self.request.query_params.get('include_archived', 'false').lower() == 'true'
         if not include_archived:
             qs = qs.filter(is_archived=False)
+        
+        approval_status = self.request.query_params.get('approval_status')
+        if approval_status:
+            qs = qs.filter(approval_status=approval_status.upper())
+            
         return qs
 
     def destroy(self, request, *args, **kwargs):
@@ -56,6 +64,104 @@ class UserViewSet(viewsets.ModelViewSet):
         user = self.get_object()
         user.restore()
         return Response({"detail": f"User @{user.username} successfully restored."})
+
+    @action(detail=False, methods=['get'], url_path='pending-approvals')
+    def pending_approvals(self, request):
+        """
+        List all accounts awaiting admin review & approval.
+        """
+        pending_users = User.objects.filter(approval_status='PENDING', is_archived=False).order_by('-created_at')
+        serializer = self.get_serializer(pending_users, many=True)
+        return Response(serializer.data)
+
+    @action(detail=True, methods=['post'], url_path='approve')
+    def approve_user(self, request, pk=None):
+        """
+        Approve an account, assign dynamic role and accessible pages, and activate login.
+        """
+        user = self.get_object()
+        payload = dict(request.data)
+        for k, v in payload.items():
+            if isinstance(v, list) and k not in ['page_codes']:
+                payload[k] = v[0] if len(v) > 0 else None
+        payload['action'] = 'APPROVE'
+
+        serializer = AccountApprovalSerializer(data=payload)
+        if not serializer.is_valid():
+            return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+        data = serializer.validated_data
+        role = None
+        if data.get('role_id'):
+            role = Role.objects.filter(id=data['role_id'], is_archived=False).first()
+        elif data.get('role_code'):
+            role = Role.objects.filter(code=data['role_code'], is_archived=False).first()
+
+        if not role:
+            return Response({"role": "Valid role is required."}, status=status.HTTP_400_BAD_REQUEST)
+
+        # Enforce single Super Admin safeguard
+        if role.code == 'SUPER_ADMIN':
+            existing_sa = User.objects.filter(role__code='SUPER_ADMIN', is_archived=False).exclude(pk=user.pk)
+            if existing_sa.exists():
+                return Response(
+                    {"detail": "System policy strictly allows only one active Super Admin account."},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+
+        user.role = role
+        user.approval_status = 'APPROVED'
+        user.is_active = True
+        user.approved_by = request.user
+        user.approved_at = timezone.now()
+        user.rejection_reason = None
+
+        # Assign custom page permissions if provided
+        page_codes = data.get('page_codes')
+        if page_codes is not None:
+            pages = PagePermission.objects.filter(code__in=page_codes)
+            user.custom_permissions.set(pages)
+
+        user.save()
+        return Response(
+            UserProfileSerializer(user).data,
+            status=status.HTTP_200_OK
+        )
+
+    @action(detail=True, methods=['post'], url_path='reject')
+    def reject_user(self, request, pk=None):
+        """
+        Reject an account application with a mandatory rejection reason.
+        """
+        user = self.get_object()
+        if user.role and user.role.code == 'SUPER_ADMIN':
+            return Response(
+                {"detail": "The Super Admin account cannot be rejected."},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        payload = dict(request.data)
+        for k, v in payload.items():
+            if isinstance(v, list):
+                payload[k] = v[0] if len(v) > 0 else None
+        payload['action'] = 'REJECT'
+
+        serializer = AccountApprovalSerializer(data=payload)
+        if not serializer.is_valid():
+            return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+        data = serializer.validated_data
+        user.approval_status = 'REJECTED'
+        user.is_active = False
+        user.rejection_reason = data.get('rejection_reason')
+        user.approved_by = request.user
+        user.approved_at = timezone.now()
+        user.save()
+
+        return Response(
+            UserProfileSerializer(user).data,
+            status=status.HTTP_200_OK
+        )
 
 
 class PersonViewSet(viewsets.ModelViewSet):

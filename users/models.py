@@ -62,18 +62,47 @@ class UserManager(BaseUserManager):
         )
         extra_fields.setdefault('is_staff', True)
         extra_fields.setdefault('is_superuser', True)
+        extra_fields.setdefault('is_active', True)
+        extra_fields.setdefault('approval_status', 'APPROVED')
         return self.create_user(username, password, role=super_admin_role, **extra_fields)
 
 
 class User(AbstractBaseUser, PermissionsMixin, BaseModel):
     """
-    System login account with Triple-Lock Super Admin Safeguards.
+    System login account with Triple-Lock Super Admin Safeguards and Approval Lifecycle.
     """
+    APPROVAL_STATUS_CHOICES = [
+        ('PENDING', 'Pending Approval'),
+        ('APPROVED', 'Approved'),
+        ('REJECTED', 'Rejected'),
+    ]
+
     username = models.CharField(max_length=150, unique=True, db_index=True)
     email = models.EmailField(unique=True, null=True, blank=True, db_index=True)
     role = models.ForeignKey(Role, on_delete=models.PROTECT, related_name='users', null=True, blank=True)
+    approval_status = models.CharField(
+        max_length=20, 
+        choices=APPROVAL_STATUS_CHOICES, 
+        default='PENDING',
+        db_index=True
+    )
+    rejection_reason = models.TextField(null=True, blank=True)
+    approved_by = models.ForeignKey(
+        'self', 
+        on_delete=models.SET_NULL, 
+        null=True, 
+        blank=True, 
+        related_name='approved_users'
+    )
+    approved_at = models.DateTimeField(null=True, blank=True)
+    custom_permissions = models.ManyToManyField(
+        PagePermission, 
+        related_name='custom_permitted_users', 
+        blank=True,
+        help_text="Custom page permissions assigned directly to this user overriding or supplementing role defaults"
+    )
     is_staff = models.BooleanField(default=False)
-    is_active = models.BooleanField(default=True)
+    is_active = models.BooleanField(default=False)
 
     objects = UserManager()
 
