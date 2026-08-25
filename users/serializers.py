@@ -25,11 +25,33 @@ class RoleSerializer(serializers.ModelSerializer):
     def get_allowed_pages(self, obj):
         return list(obj.permissions.values_list('code', flat=True))
 
+    def _resolve_permissions(self, permission_codes):
+        perms = []
+        for pcode in permission_codes:
+            perm = PagePermission.objects.filter(code=pcode).first()
+            if not perm:
+                parts = pcode.split(':')
+                base_code = parts[0]
+                action_name = parts[1] if len(parts) > 1 else 'view'
+                base_perm = PagePermission.objects.filter(code=base_code).first()
+                perm, _ = PagePermission.objects.get_or_create(
+                    code=pcode,
+                    defaults={
+                        'name': f"{base_perm.name if base_perm else base_code.title()} ({action_name.capitalize()})",
+                        'module': base_perm.module if base_perm else 'SYSTEM',
+                        'icon': base_perm.icon if base_perm else 'fi fi-rr-check',
+                        'description': f"Permission to {action_name} in {base_perm.name if base_perm else base_code}"
+                    }
+                )
+            if perm:
+                perms.append(perm)
+        return perms
+
     def create(self, validated_data):
         permission_codes = validated_data.pop('permission_codes', [])
         role = Role.objects.create(**validated_data)
         if permission_codes:
-            perms = PagePermission.objects.filter(code__in=permission_codes)
+            perms = self._resolve_permissions(permission_codes)
             role.permissions.set(perms)
         return role
 
@@ -43,7 +65,7 @@ class RoleSerializer(serializers.ModelSerializer):
         instance.save()
 
         if permission_codes is not None:
-            perms = PagePermission.objects.filter(code__in=permission_codes)
+            perms = self._resolve_permissions(permission_codes)
             instance.permissions.set(perms)
         return instance
 
