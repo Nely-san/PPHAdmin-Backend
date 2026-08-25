@@ -1,47 +1,17 @@
 from rest_framework import viewsets, permissions, status
+from rest_framework.views import APIView
 from rest_framework.decorators import action, api_view, permission_classes
 from rest_framework.response import Response
 from rest_framework_simplejwt.views import TokenObtainPairView
 from rest_framework_simplejwt.tokens import RefreshToken
 
-from users.models import User, Role, PagePermission, Person
+from users.models import User, Person
 from users.serializers import (
-    RoleSerializer, 
-    PagePermissionSerializer, 
     UserProfileSerializer,
     PersonDetailSerializer,
     CustomTokenObtainPairSerializer,
     RegisterSerializer
 )
-
-class RoleViewSet(viewsets.ModelViewSet):
-    """
-    CRUD ViewSet for Super Admin to manage dynamic roles & assign page permissions.
-    """
-    queryset = Role.objects.filter(is_archived=False)
-    serializer_class = RoleSerializer
-    permission_classes = [permissions.IsAuthenticated]
-    pagination_class = None
-
-    def destroy(self, request, *args, **kwargs):
-        role = self.get_object()
-        if role.is_system_role or role.code == 'SUPER_ADMIN':
-            return Response(
-                {"detail": "System baseline roles (including SUPER_ADMIN) cannot be deleted."},
-                status=status.HTTP_400_BAD_REQUEST
-            )
-        role.archive(user_identifier=request.user.username)
-        return Response(status=status.HTTP_204_NO_CONTENT)
-
-
-class PagePermissionViewSet(viewsets.ReadOnlyModelViewSet):
-    """
-    Catalog of all functional page permissions for the Super Admin assignment matrix.
-    """
-    queryset = PagePermission.objects.filter(is_archived=False)
-    serializer_class = PagePermissionSerializer
-    permission_classes = [permissions.IsAuthenticated]
-    pagination_class = None
 
 
 class UserViewSet(viewsets.ModelViewSet):
@@ -180,3 +150,28 @@ def logout_view(request):
     except Exception:
         pass
     return Response({"detail": "Successfully logged out."})
+
+
+class ChangePasswordView(APIView):
+    """
+    Endpoint for authenticated users to update their password.
+    """
+    permission_classes = [permissions.IsAuthenticated]
+
+    def post(self, request):
+        current_password = request.data.get('current_password')
+        new_password = request.data.get('new_password')
+
+        if not current_password or not new_password:
+            return Response({'error': 'Current and new passwords are required.'}, status=status.HTTP_400_BAD_REQUEST)
+
+        user = request.user
+
+        if not user.check_password(current_password):
+            return Response({'error': 'Incorrect current password.'}, status=status.HTTP_400_BAD_REQUEST)
+
+        user.set_password(new_password)
+        user.save()
+
+        return Response({'message': 'Password updated successfully.'}, status=status.HTTP_200_OK)
+
