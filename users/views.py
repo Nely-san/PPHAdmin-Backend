@@ -281,3 +281,122 @@ class ChangePasswordView(APIView):
 
         return Response({'message': 'Password updated successfully.'}, status=status.HTTP_200_OK)
 
+
+class GoogleLoginView(APIView):
+    """
+    Endpoint for Google Sign-In and Sign-Up.
+    Handles Google OAuth2 authentication by receiving user credentials from the frontend,
+    matching with existing accounts, or auto-provisioning a new Employee User and Person profile.
+
+    -----------------------------------------------------------------------------------------
+    HOW TO CONNECT TO GOOGLE (BACKEND SETUP):
+    -----------------------------------------------------------------------------------------
+    1. The frontend initiates Google Sign-In and obtains Google credentials (or ID token).
+    2. The frontend sends POST /api/auth/google-login/ with { email, first_name, last_name, name }.
+    3. (OPTIONAL ENHANCEMENT - Server-side ID Token Verification):
+       If you pass `id_token` or `credential` from the frontend, you can verify it directly with Google:
+       
+       ```python
+       from google.oauth2 import id_token
+       from google.auth.transport import requests as google_requests
+       from django.conf import settings
+
+       # idinfo = id_token.verify_oauth2_token(token, google_requests.Request(), settings.GOOGLE_CLIENT_ID)
+       # email = idinfo['email']
+       # name = idinfo.get('name')
+       ```
+    -----------------------------------------------------------------------------------------
+    """
+    permission_classes = [permissions.AllowAny]
+
+    def post(self, request):
+        # Extract Google profile data sent from the frontend
+        email = request.data.get('email', '').strip().lower()
+        first_name = request.data.get('first_name', '').strip()
+        last_name = request.data.get('last_name', '').strip()
+        name = request.data.get('name', '').strip() or f"{first_name} {last_name}".strip()
+
+        if not email:
+            return Response({'error': 'Email is required.'}, status=status.HTTP_400_BAD_REQUEST)
+
+        user = User.objects.filter(email__iexact=email, is_archived=False).first()
+        is_new_user = False
+
+        if not user:
+            # ---------------------------------------------------------------------------------
+            # GOOGLE SIGN-UP FLOW: Provision new User + linked Person HR profile
+            # ---------------------------------------------------------------------------------
+            is_new_user = True
+            base_username = email.split('@')[0]
+            username = base_username
+            counter = 1
+            while User.objects.filter(username__iexact=username).exists():
+                username = f"{base_username}{counter}"
+                counter += 1
+
+            employee_role = Role.objects.filter(code='EMPLOYEE').first()
+
+            user = User.objects.create(
+                username=username,
+                email=email,
+                role=employee_role,
+                approval_status='PENDING',  # Account awaits admin review & approval
+                is_active=False,
+                is_staff=False,
+                is_archived=False
+            )
+            # Google OAuth users don't need a local raw password
+            user.set_unusable_password()
+            user.save()
+
+            # Create corresponding personnel HR profile
+            display_name = name if name else username
+            Person.objects.create(
+                user=user,
+                name=display_name,
+                person_type='EMPLOYEE',
+                employment_mode='FULL_TIME',
+                rate_type='DAILY',
+                base_rate=0.00,
+                status='ACTIVE'
+            )
+
+            serializer = UserProfileSerializer(user)
+            return Response({
+                'is_new_user': True,
+                'approval_status': 'PENDING',
+                'message': 'Account registered successfully with Google. Please wait for an administrator to approve your account before you can log in.',
+                'user': serializer.data
+            }, status=status.HTTP_201_CREATED)
+
+        if user.approval_status == 'PENDING':
+            return Response({
+                'error': 'Your account registration is pending approval. You cannot log in until an administrator approves your account.'
+            }, status=status.HTTP_403_FORBIDDEN)
+
+        if user.approval_status == 'REJECTED':
+            reason = f" Reason: {user.rejection_reason}" if user.rejection_reason else ""
+            return Response({
+                'error': f'Your account registration has been rejected.{reason}'
+            }, status=status.HTTP_403_FORBIDDEN)
+
+        if not user.is_active:
+            return Response({
+                'error': 'Your account has been deactivated. Please contact an administrator.'
+            }, status=status.HTTP_403_FORBIDDEN)
+
+        refresh = RefreshToken.for_user(user)
+        refresh['username'] = user.username
+        refresh['role'] = user.role.code if user.role else 'EMPLOYEE'
+
+        serializer = UserProfileSerializer(user)
+
+        return Response({
+            'access': str(getattr(refresh, 'access_token', '')),
+            'access_token': str(getattr(refresh, 'access_token', '')),
+            'refresh': str(refresh),
+            'is_new_user': False,
+            'user': serializer.data
+        }, status=status.HTTP_200_OK)
+
+

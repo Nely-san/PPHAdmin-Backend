@@ -171,3 +171,16 @@ MAILERS = {
         'BACKEND': 'django.core.mail.backends.console.EmailBackend',
     },
 }
+
+# ==============================================================================
+# GOOGLE OAUTH 2.0 CONFIGURATION
+# ==============================================================================
+# [STEP 1]: Go to Google Cloud Console: https://console.cloud.google.com/apis/credentials
+# [STEP 2]: Create an OAuth 2.0 Client ID (Web Application).
+# [STEP 3]: Add Authorized JavaScript Origins:
+#           - http://localhost:5173
+#           - http://localhost:8080 (or your production domain)
+# [STEP 4]: Paste your Client ID and Client Secret below or in your .env file:
+GOOGLE_CLIENT_ID = os.environ.get('GOOGLE_CLIENT_ID', 'YOUR_GOOGLE_CLIENT_ID.apps.googleusercontent.com')
+GOOGLE_CLIENT_SECRET = os.environ.get('GOOGLE_CLIENT_SECRET', 'YOUR_GOOGLE_CLIENT_SECRET')
+
