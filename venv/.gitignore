@@ -1,0 +1,126 @@
+# Created by https://www.gitignore.io
+
+### OSX ###
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# Icon must end with two \r
+Icon
+
+
+# Thumbnails
+._*
+
+# Files that might appear on external disk
+.Spotlight-V100
+.Trashes
+
+# Directories potentially created on remote AFP share
+.AppleDB
+.AppleDesktop
+Network Trash Folder
+Temporary Items
+.apdisk
+
+
+### Python ###
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+
+# C extensions
+*.so
+
+# Distribution / packaging
+.Python
+README.md
+venv/
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# PyInstaller
+#  Usually these files are written by a python script from a template
+#  before PyInstaller builds the exe, so as to inject date/other infos into it.
+*.manifest
+*.spec
+
+# Installer logs
+pip-log.txt
+pip-delete-this-directory.txt
+
+# Unit test / coverage reports
+htmlcov/
+.tox/
+.coverage
+.cache
+nosetests.xml
+coverage.xml
+
+# Translations
+*.mo
+*.pot
+
+# Sphinx documentation
+docs/_build/
+
+# PyBuilder
+target/
+
+
+### Django ###
+*.log
+*.pot
+*.pyc
+__pycache__/
+local_settings.py
+
+# Ignore Django migration files
+**/migrations/
+!**/migrations/__init__.py
+
+.env
+db.sqlite3
+media/listing_images/pph_6.webp
+media/listing_images/pph_10.webp
+media/listing_images/pph_9.webp
+media/listing_images/pph_8.webp
+media/listing_images/pph_7.webp
+media/listing_images/pph_5.webp
+media/listing_images/pph_4.webp
+media/listing_images/pph_3.webp
+media/listing_images/pph_1.webp
+media/listing_images/pph_2.webp
+media/listing_images/pph_1_7KhRle2.webp
+media/listing_images/pph_1_HAaULu3.webp
+media/listing_images/pph_2_5PUzXTu.webp
+media/listing_images/pph_2_PSduBuq.webp
+media/listing_images/pph_3_EGz3Ew5.webp
+media/listing_images/pph_3_mamqIuS.webp
+media/listing_images/pph_4_ntjJQDs.webp
+media/listing_images/pph_4_5b7pPpE.webp
+media/listing_images/pph_5_2PuuCGg.webp
+media/listing_images/pph_5_paOwZ0O.webp
+media/listing_images/pph_6_8hcEnUR.webp
+media/listing_images/pph_6_3dkx7UE.webp
+media/listing_images/1_nl806Hp.webp
+media/listing_images/2_f7bT3Qd.webp
+media/listing_images/3_pNluBdu.webp
+media/listing_images/5_I6TGCI0.webp
+media/listing_images/4_KG3zWVS.webp
+media/listing_documents/marketplace.png
+media/listing_documents/posting_9_YMSbvgz.png
+media/listing_documents/posting_9.png
+media/listing_documents/pph_gPKSo7n.jpg
+media/listing_images/pph_10_vqMucZu.webp
