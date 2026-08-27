@@ -1,4 +1,3 @@
-import uuid
 from django.db import models
 from django.contrib.auth.models import AbstractBaseUser, PermissionsMixin, BaseUserManager
 from django.core.exceptions import ValidationError
@@ -28,6 +27,7 @@ class Role(BaseModel):
     Dynamic Roles configurable by Super Admin.
     Can be assigned any combination of PagePermissions.
     """
+    id = models.BigAutoField(primary_key=True, editable=False)
     name = models.CharField(max_length=100, unique=True)
     code = models.CharField(max_length=100, unique=True, db_index=True)
     description = models.TextField(null=True, blank=True)

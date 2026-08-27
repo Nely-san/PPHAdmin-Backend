@@ -247,7 +247,7 @@ class AccountApprovalSerializer(serializers.Serializer):
     """
     action = serializers.ChoiceField(choices=['APPROVE', 'REJECT'])
     role_code = serializers.CharField(required=False, allow_null=True)
-    role_id = serializers.UUIDField(required=False, allow_null=True)
+    role_id = serializers.IntegerField(required=False, allow_null=True)
     page_codes = serializers.ListField(
         child=serializers.CharField(), required=False, allow_empty=True
     )
