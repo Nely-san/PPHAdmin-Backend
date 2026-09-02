@@ -1,3 +1,4 @@
+from django.db.models import Case, When, Value, IntegerField
 from django.utils import timezone
 from rest_framework import viewsets, permissions, status
 from rest_framework.views import APIView
@@ -14,6 +15,15 @@ from users.serializers import (
     RegisterSerializer,
     AccountApprovalSerializer
 )
+
+ROLE_ORDER_MAP = {
+    'SUPER_ADMIN': 1,
+    'ADMIN': 2,
+    'HR_MANAGER': 3,
+    'PAYROLL_OFFICER': 4,
+    'EMPLOYEE': 5,
+    'OJT': 6,
+}
 
 
 class UserViewSet(viewsets.ModelViewSet):
@@ -43,6 +53,21 @@ class UserViewSet(viewsets.ModelViewSet):
         elif not include_pending:
             qs = qs.filter(approval_status='APPROVED', is_active=True)
             
+        role_when_clauses = [When(role__code=code, then=Value(rank)) for code, rank in ROLE_ORDER_MAP.items()]
+
+        qs = qs.annotate(
+            is_pending_order=Case(
+                When(approval_status='PENDING', is_archived=False, then=Value(0)),
+                default=Value(1),
+                output_field=IntegerField(),
+            ),
+            role_hierarchy_order=Case(
+                *role_when_clauses,
+                default=Value(99),
+                output_field=IntegerField(),
+            )
+        ).order_by('is_pending_order', 'role_hierarchy_order', 'username')
+
         return qs
 
     def destroy(self, request, *args, **kwargs):

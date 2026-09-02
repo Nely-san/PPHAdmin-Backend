@@ -203,9 +203,46 @@ class Person(BaseModel):
     # Setup Queue Flag for biometric auto-registered profiles
     is_newly_imported = models.BooleanField(default=False, db_index=True)
 
+    # Work Schedule & Arrangement Setup
+    work_setup = models.CharField(max_length=20, default='ONSITE', null=True, blank=True, help_text="ONSITE, WFH, HYBRID, OFFSITE")
+    notes = models.TextField(null=True, blank=True, help_text="Work arrangement notes, reporting method, hybrid schedule, etc.")
+    shift_code = models.CharField(max_length=50, default='DAY', null=True, blank=True)
+    work_days = models.CharField(max_length=100, default='Mon - Fri', null=True, blank=True)
+
     class Meta:
         db_table = 'persons'
         ordering = ['name']
 
     def __str__(self):
         return f"{self.name} ({self.person_type})"
+
+
+from django.db.models.signals import post_save
+from django.dispatch import receiver
+
+@receiver(post_save, sender=User)
+def ensure_person_for_user(sender, instance, created, **kwargs):
+    """
+    Ensure every active/created User account has a corresponding Person profile
+    so it seamlessly appears in the Employees directory.
+    """
+    try:
+        person = getattr(instance, 'person', None)
+        if not person:
+            existing_person = Person.objects.filter(name__iexact=instance.username, user__isnull=True).first()
+            if existing_person:
+                existing_person.user = instance
+                existing_person.save(update_fields=['user'])
+            else:
+                is_ojt = instance.role and instance.role.code == 'OJT'
+                Person.objects.create(
+                    user=instance,
+                    name=instance.username,
+                    person_type='OJT' if is_ojt else 'EMPLOYEE',
+                    employment_mode='INTERN' if is_ojt else 'FULL_TIME',
+                    rate_type='HOURLY' if is_ojt else 'DAILY',
+                    base_rate=0.00,
+                    status='ACTIVE'
+                )
+    except Exception:
+        pass

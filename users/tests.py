@@ -186,3 +186,24 @@ class AccountApprovalTests(TestCase):
         self.assertEqual(login_response.data['user']['approval_status'], 'APPROVED')
         self.assertTrue(login_response.data['user']['is_active'])
 
+    def test_nonexistent_user_login_error(self):
+        login_response = self.client.post('/api/auth/login/', {
+            'username': 'nonexistent_user_12345',
+            'password': 'SomePassword123!'
+        })
+        self.assertEqual(login_response.status_code, status.HTTP_400_BAD_REQUEST)
+        detail = login_response.data.get('detail')
+        detail_str = detail[0] if isinstance(detail, list) else detail
+        self.assertEqual(detail_str, 'No account found with that username or email.')
+
+    def test_wrong_password_login_error(self):
+        login_response = self.client.post('/api/auth/login/', {
+            'username': 'admin_boss',
+            'password': 'WrongPassword123!'
+        })
+        self.assertEqual(login_response.status_code, status.HTTP_400_BAD_REQUEST)
+        detail = login_response.data.get('detail')
+        detail_str = detail[0] if isinstance(detail, list) else detail
+        self.assertEqual(detail_str, 'Incorrect password. Please try again.')
+
+

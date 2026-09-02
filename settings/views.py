@@ -48,9 +48,16 @@ class RoleViewSet(viewsets.ModelViewSet):
 
     def destroy(self, request, *args, **kwargs):
         role = self.get_object()
-        if role.is_system_role or role.code == 'SUPER_ADMIN':
+        if role.code == 'SUPER_ADMIN':
             return Response(
-                {"detail": "System baseline roles (including SUPER_ADMIN) cannot be deleted."},
+                {"detail": "The Super Admin role is permanent and cannot be deleted."},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        from users.models import User
+        active_users = User.objects.filter(role=role, is_archived=False)
+        if active_users.exists():
+            return Response(
+                {"detail": f"Cannot delete role '{role.name or role.code}' because {active_users.count()} active user(s) are currently assigned to it. Please reassign them first."},
                 status=status.HTTP_400_BAD_REQUEST
             )
         role.archive(user_identifier=request.user.username)

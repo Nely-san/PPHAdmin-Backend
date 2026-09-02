@@ -11,6 +11,8 @@ class PersonDetailSerializer(serializers.ModelSerializer):
     approval_status = serializers.CharField(source='user.approval_status', read_only=True, default=None)
     is_active = serializers.BooleanField(source='user.is_active', read_only=True, default=None)
 
+    biometric_id = serializers.CharField(required=False, allow_null=True, allow_blank=True)
+
     class Meta:
         model = Person
         fields = [
@@ -18,8 +20,43 @@ class PersonDetailSerializer(serializers.ModelSerializer):
             'biometric_id', 'name', 'person_type', 'employment_mode', 
             'rate_type', 'base_rate', 'date_started', 'date_ended', 'status', 
             'company_name', 'department_name', 'school_name', 'coordinator_contact', 
-            'required_ojt_hours', 'rendered_ojt_hours', 'is_newly_imported'
+            'required_ojt_hours', 'rendered_ojt_hours', 'is_newly_imported',
+            'work_setup', 'notes', 'shift_code', 'work_days'
         ]
+
+    def to_internal_value(self, data):
+        mapped_data = data.copy() if hasattr(data, 'copy') else dict(data)
+        camel_to_snake = {
+            'biometricId': 'biometric_id',
+            'personType': 'person_type',
+            'employmentMode': 'employment_mode',
+            'rateType': 'rate_type',
+            'baseRate': 'base_rate',
+            'dateStarted': 'date_started',
+            'dateEnded': 'date_ended',
+            'companyName': 'company_name',
+            'departmentName': 'department_name',
+            'schoolName': 'school_name',
+            'coordinatorContact': 'coordinator_contact',
+            'requiredOjtHours': 'required_ojt_hours',
+            'renderedOjtHours': 'rendered_ojt_hours',
+            'isNewlyImported': 'is_newly_imported',
+            'workSetup': 'work_setup',
+            'shiftCode': 'shift_code',
+            'workDays': 'work_days',
+        }
+        for camel, snake in camel_to_snake.items():
+            if camel in mapped_data and snake not in mapped_data:
+                mapped_data[snake] = mapped_data[camel]
+
+        if 'biometric_id' in mapped_data:
+            bio = mapped_data['biometric_id']
+            if bio is None or (isinstance(bio, str) and not bio.strip()):
+                mapped_data['biometric_id'] = None
+            else:
+                mapped_data['biometric_id'] = str(bio).strip()
+
+        return super().to_internal_value(mapped_data)
 
 
 
@@ -129,43 +166,60 @@ class CustomTokenObtainPairSerializer(TokenObtainPairSerializer):
         return token
 
     def validate(self, attrs):
-        username_or_email = attrs.get('username', '')
+        username_or_email = (attrs.get('username') or '').strip()
         password = attrs.get('password', '')
 
+        if not username_or_email:
+            raise serializers.ValidationError({
+                "detail": "Username or email is required."
+            })
+
+        if not password:
+            raise serializers.ValidationError({
+                "detail": "Password is required."
+            })
+
         # Support login via either username or email
-        user_obj = None
-        if username_or_email:
-            user_obj = User.objects.filter(username__iexact=username_or_email).first()
-            if not user_obj:
-                user_obj = User.objects.filter(email__iexact=username_or_email).first()
-            if user_obj:
-                attrs['username'] = user_obj.username
+        user_obj = User.objects.filter(username__iexact=username_or_email).first()
+        if not user_obj:
+            user_obj = User.objects.filter(email__iexact=username_or_email).first()
 
-        # If user exists and password is verified, provide explicit status checks
-        if user_obj and password and user_obj.check_password(password):
-            if user_obj.is_archived:
+        if not user_obj:
+            raise serializers.ValidationError({
+                "detail": "No account found with that username or email."
+            })
+
+        if not user_obj.check_password(password):
+            raise serializers.ValidationError({
+                "detail": "Incorrect password. Please try again."
+            })
+
+        if user_obj.is_archived:
+            raise serializers.ValidationError({
+                "detail": "This account has been archived. Please contact an administrator."
+            })
+
+        if user_obj.approval_status == 'PENDING' or not user_obj.is_active:
+            if user_obj.approval_status == 'PENDING':
                 raise serializers.ValidationError({
-                    "detail": "This account has been archived. Please contact an administrator."
+                    "detail": "Your account registration is pending approval. You cannot log in until an administrator approves your account."
                 })
-            if user_obj.approval_status == 'PENDING' or not user_obj.is_active:
-                if user_obj.approval_status == 'PENDING':
-                    raise serializers.ValidationError({
-                        "detail": "Your account registration is pending approval. You cannot log in until an administrator approves your account."
-                    })
-                elif user_obj.approval_status == 'REJECTED':
-                    reason = f" Reason: {user_obj.rejection_reason}" if user_obj.rejection_reason else ""
-                    raise serializers.ValidationError({
-                        "detail": f"Your account registration has been rejected.{reason}"
-                    })
-                else:
-                    raise serializers.ValidationError({
-                        "detail": "Your account is currently inactive. You cannot log in until it is activated."
-                    })
-            if user_obj.approval_status != 'APPROVED':
+            elif user_obj.approval_status == 'REJECTED':
+                reason = f" Reason: {user_obj.rejection_reason}" if user_obj.rejection_reason else ""
                 raise serializers.ValidationError({
-                    "detail": "Your account is not approved. You cannot log in until an administrator approves your account."
+                    "detail": f"Your account registration has been rejected.{reason}"
+                })
+            else:
+                raise serializers.ValidationError({
+                    "detail": "Your account is currently inactive. You cannot log in until it is activated."
                 })
 
+        if user_obj.approval_status != 'APPROVED':
+            raise serializers.ValidationError({
+                "detail": "Your account is not approved. You cannot log in until an administrator approves your account."
+            })
+
+        attrs['username'] = user_obj.username
         data = super().validate(attrs)
 
         # Safety check on authenticated user
