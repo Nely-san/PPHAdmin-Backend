@@ -28,13 +28,20 @@ class UserViewSet(viewsets.ModelViewSet):
 
     def get_queryset(self):
         qs = User.objects.all()
+        # For detail actions (approve, reject, archive, unarchive, retrieve, update, etc.), do not restrict queryset by list filters
+        if self.action and self.action not in ['list', 'pending_approvals']:
+            return qs
+
         include_archived = self.request.query_params.get('include_archived', 'false').lower() == 'true'
+        include_pending = self.request.query_params.get('include_pending', 'false').lower() == 'true'
         if not include_archived:
             qs = qs.filter(is_archived=False)
         
         approval_status = self.request.query_params.get('approval_status')
         if approval_status:
             qs = qs.filter(approval_status=approval_status.upper())
+        elif not include_pending:
+            qs = qs.filter(approval_status='APPROVED', is_active=True)
             
         return qs
 
@@ -174,10 +181,25 @@ class PersonViewSet(viewsets.ModelViewSet):
     pagination_class = None
 
     def get_queryset(self):
+        from django.db.models import Q
         qs = Person.objects.all()
+        if self.action and self.action not in ['list']:
+            return qs
+
         include_archived = self.request.query_params.get('include_archived', 'false').lower() == 'true'
+        include_pending = self.request.query_params.get('include_pending', 'false').lower() == 'true'
+        
         if not include_archived:
-            qs = qs.filter(is_archived=False)
+            qs = qs.filter(is_archived=False).exclude(status='ARCHIVED')
+        else:
+            status_param = self.request.query_params.get('status')
+            if status_param == 'ARCHIVED':
+                qs = qs.filter(Q(is_archived=True) | Q(status='ARCHIVED'))
+
+        if not include_pending:
+            qs = qs.filter(
+                Q(user__isnull=True) | Q(user__approval_status='APPROVED', user__is_active=True)
+            )
         return qs
 
     @action(detail=True, methods=['post'], url_path='archive')
@@ -398,5 +420,20 @@ class GoogleLoginView(APIView):
             'is_new_user': False,
             'user': serializer.data
         }, status=status.HTTP_200_OK)
+
+
+@api_view(['GET'])
+@permission_classes([permissions.IsAuthenticated])
+def notifications_list_view(request):
+    """Returns the list of notifications for the current authenticated user."""
+    return Response([])
+
+
+@api_view(['GET'])
+@permission_classes([permissions.IsAuthenticated])
+def notifications_unread_count_view(request):
+    """Returns the unread notifications count for the current authenticated user."""
+    return Response({"unreadCount": 0})
+
 
 

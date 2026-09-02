@@ -1,18 +1,50 @@
 from rest_framework import viewsets, permissions, status
 from rest_framework.decorators import action, api_view, permission_classes
 from rest_framework.response import Response
-from settings.models import SystemParameter
-from settings.serializers import SystemParameterSerializer, RoleSerializer, PagePermissionSerializer
+from settings.models import SystemParameter, ModuleAccess
+from settings.serializers import (
+    SystemParameterSerializer, RoleSerializer, PagePermissionSerializer, ModuleAccessSerializer
+)
 from users.models import Role, PagePermission
 
 class RoleViewSet(viewsets.ModelViewSet):
     """
     CRUD ViewSet for Super Admin to manage dynamic roles & assign page permissions.
+    Supports lookup by either database ID or role code (e.g. 'ADMIN', 'HR_MANAGER').
     """
     queryset = Role.objects.filter(is_archived=False)
     serializer_class = RoleSerializer
     permission_classes = [permissions.IsAuthenticated]
     pagination_class = None
+    lookup_value_regex = '[^/]+'
+
+    def get_object(self):
+        lookup_url_kwarg = self.lookup_url_kwarg or self.lookup_field
+        lookup_value = self.kwargs[lookup_url_kwarg]
+        queryset = self.filter_queryset(self.get_queryset())
+        
+        obj = None
+        if str(lookup_value).isdigit():
+            obj = queryset.filter(pk=lookup_value).first()
+        if not obj:
+            obj = queryset.filter(code__iexact=str(lookup_value)).first()
+        if not obj:
+            obj = queryset.filter(name__iexact=str(lookup_value)).first()
+            
+        if not obj:
+            from django.http import Http404
+            raise Http404(f"Role '{lookup_value}' not found.")
+            
+        self.check_object_permissions(self.request, obj)
+        return obj
+
+    def update(self, request, *args, **kwargs):
+        partial = kwargs.pop('partial', True)
+        instance = self.get_object()
+        serializer = self.get_serializer(instance, data=request.data, partial=partial)
+        serializer.is_valid(raise_exception=True)
+        self.perform_update(serializer)
+        return Response(serializer.data)
 
     def destroy(self, request, *args, **kwargs):
         role = self.get_object()
@@ -25,6 +57,16 @@ class RoleViewSet(viewsets.ModelViewSet):
         return Response(status=status.HTTP_204_NO_CONTENT)
 
 
+class ModuleAccessViewSet(viewsets.ModelViewSet):
+    """
+    ViewSet for Dynamic RBAC Module Access and Navigation Configuration (table: settings_module_access).
+    """
+    queryset = ModuleAccess.objects.filter(is_archived=False).order_by('display_order', 'id')
+    serializer_class = ModuleAccessSerializer
+    permission_classes = [permissions.IsAuthenticated]
+    pagination_class = None
+
+
 class PagePermissionViewSet(viewsets.ReadOnlyModelViewSet):
     """
     Catalog of all functional page permissions for the Super Admin assignment matrix.
@@ -33,6 +75,7 @@ class PagePermissionViewSet(viewsets.ReadOnlyModelViewSet):
     serializer_class = PagePermissionSerializer
     permission_classes = [permissions.IsAuthenticated]
     pagination_class = None
+
 
 class SystemParameterViewSet(viewsets.ModelViewSet):
     """

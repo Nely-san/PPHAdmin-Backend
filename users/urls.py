@@ -19,6 +19,10 @@ urlpatterns = [
 
     # Resource routers (users, persons)
     path('', include(router.urls)),
+
+    # Notification endpoints
+    path('notifications/', notifications_list_view, name='notifications_list'),
+    path('notifications/unread-count', notifications_unread_count_view, name='notifications_unread_count'),
 ]
 
 

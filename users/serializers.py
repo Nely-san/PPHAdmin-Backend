@@ -6,20 +6,28 @@ from settings.serializers import PagePermissionSerializer, RoleSerializer
 
 
 class PersonDetailSerializer(serializers.ModelSerializer):
+    user_id = serializers.CharField(source='user.id', read_only=True, default=None)
+    username = serializers.CharField(source='user.username', read_only=True, default=None)
+    approval_status = serializers.CharField(source='user.approval_status', read_only=True, default=None)
+    is_active = serializers.BooleanField(source='user.is_active', read_only=True, default=None)
+
     class Meta:
         model = Person
         fields = [
-            'id', 'biometric_id', 'name', 'person_type', 'employment_mode', 
+            'id', 'user_id', 'username', 'approval_status', 'is_active',
+            'biometric_id', 'name', 'person_type', 'employment_mode', 
             'rate_type', 'base_rate', 'date_started', 'date_ended', 'status', 
             'company_name', 'department_name', 'school_name', 'coordinator_contact', 
             'required_ojt_hours', 'rendered_ojt_hours', 'is_newly_imported'
         ]
 
 
+
 class UserProfileSerializer(serializers.ModelSerializer):
     role = serializers.SerializerMethodField()
     role_detail = RoleSerializer(source='role', read_only=True)
     allowed_pages = serializers.SerializerMethodField()
+    navigation = serializers.SerializerMethodField()
     role_code = serializers.CharField(write_only=True, required=False)
     role_id = serializers.PrimaryKeyRelatedField(
         queryset=Role.objects.filter(is_archived=False), source='role', write_only=True, required=False
@@ -32,7 +40,7 @@ class UserProfileSerializer(serializers.ModelSerializer):
     class Meta:
         model = User
         fields = [
-            'id', 'username', 'email', 'role', 'role_detail', 'allowed_pages', 
+            'id', 'username', 'email', 'role', 'role_detail', 'allowed_pages', 'navigation',
             'role_code', 'role_id', 'person', 'password', 'is_active', 'is_staff', 
             'approval_status', 'rejection_reason', 'approved_by', 'approved_by_username',
             'approved_at', 'custom_permissions', 'is_archived', 'created_at'
@@ -44,11 +52,23 @@ class UserProfileSerializer(serializers.ModelSerializer):
     def get_allowed_pages(self, obj):
         if not obj.role:
             return list(obj.custom_permissions.values_list('code', flat=True))
-        if obj.role.code == 'SUPER_ADMIN':
-            return list(PagePermission.objects.values_list('code', flat=True))
         role_pages = set(obj.role.permissions.values_list('code', flat=True))
         custom_pages = set(obj.custom_permissions.values_list('code', flat=True))
         return list(role_pages | custom_pages)
+
+    def get_navigation(self, obj):
+        from settings.models import ModuleAccess
+        from settings.serializers import ModuleAccessSerializer
+
+        allowed_codes = self.get_allowed_pages(obj)
+        # Always include dashboard
+        if 'dashboard' not in allowed_codes:
+            allowed_codes.append('dashboard')
+        # Extract base codes in case granular format like 'employees:view' is used
+        base_codes = set(c.split(':')[0] for c in allowed_codes)
+        modules = ModuleAccess.objects.filter(code__in=base_codes, is_archived=False).order_by('display_order', 'id')
+        return ModuleAccessSerializer(modules, many=True).data
+
 
     def to_internal_value(self, data):
         ret = super().to_internal_value(data)
