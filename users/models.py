@@ -1,7 +1,7 @@
 from django.db import models
 from django.contrib.auth.models import AbstractBaseUser, PermissionsMixin, BaseUserManager
 from django.core.exceptions import ValidationError
-from core.models import BaseModel
+from settings.models import BaseModel
 
 class PagePermission(BaseModel):
     """

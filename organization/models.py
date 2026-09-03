@@ -1,5 +1,5 @@
 from django.db import models
-from core.models import BaseModel
+from settings.models import BaseModel
 
 class Company(BaseModel):
     """
