@@ -93,29 +93,37 @@ class SystemParameterViewSet(viewsets.ModelViewSet):
     permission_classes = [permissions.IsAuthenticated]
     pagination_class = None
 
-    def create(self, request, *args, **kwargs):
+    def _apply_bulk_updates(self, data):
         """
-        Supports both single record creation and bulk dictionary update (as used by SystemSettingsPage).
+        Parses and applies updates from various formats:
+        - {"updates": [{"key": "k", "value": "v"}, ...]}
+        - [{"key": "k", "value": "v"}, ...]
+        - {"key1": "val1", "key2": "val2", ...}
         """
-        # If payload is a dictionary of key-values { "attendance_grace_period": "15", ... }
-        if isinstance(request.data, dict) and not ('key' in request.data and 'value' in request.data):
-            updated_params = []
-            for k, v in request.data.items():
-                param, _ = SystemParameter.objects.get_or_create(
-                    key=k,
-                    defaults={'value': str(v)}
-                )
-                param.value = str(v)
-                param.save()
-                updated_params.append(param)
-            return Response(SystemParameterSerializer(updated_params, many=True).data)
+        if isinstance(data, dict) and "updates" in data and isinstance(data["updates"], list):
+            items = data["updates"]
+            for item in items:
+                if isinstance(item, dict) and 'key' in item and 'value' in item:
+                    param, _ = SystemParameter.objects.get_or_create(
+                        key=item['key'],
+                        defaults={'value': str(item['value'])}
+                    )
+                    param.value = str(item['value'])
+                    param.save()
+            return SystemParameter.objects.filter(is_archived=False)
 
-        return super().create(request, *args, **kwargs)
+        if isinstance(data, list):
+            for item in data:
+                if isinstance(item, dict) and 'key' in item and 'value' in item:
+                    param, _ = SystemParameter.objects.get_or_create(
+                        key=item['key'],
+                        defaults={'value': str(item['value'])}
+                    )
+                    param.value = str(item['value'])
+                    param.save()
+            return SystemParameter.objects.filter(is_archived=False)
 
-    @action(detail=False, methods=['put', 'post'], url_path='bulk')
-    def bulk_update(self, request):
-        data = request.data
-        if isinstance(data, dict):
+        if isinstance(data, dict) and not ('key' in data and 'value' in data):
             for k, v in data.items():
                 param, _ = SystemParameter.objects.get_or_create(
                     key=k,
@@ -123,4 +131,30 @@ class SystemParameterViewSet(viewsets.ModelViewSet):
                 )
                 param.value = str(v)
                 param.save()
-        return Response({"detail": "Settings successfully updated."})
+            return SystemParameter.objects.filter(is_archived=False)
+
+        return None
+
+    def create(self, request, *args, **kwargs):
+        """
+        Supports single record creation and bulk dictionary/list update.
+        """
+        updated_qs = self._apply_bulk_updates(request.data)
+        if updated_qs is not None:
+            return Response(SystemParameterSerializer(updated_qs, many=True).data)
+
+        return super().create(request, *args, **kwargs)
+
+    @action(detail=False, methods=['put', 'patch', 'post'], url_path='bulk')
+    def bulk_update(self, request, *args, **kwargs):
+        """
+        Handles bulk updates sent to /api/system-parameters/ or /api/system-parameters/bulk/
+        """
+        updated_qs = self._apply_bulk_updates(request.data)
+        if updated_qs is not None:
+            return Response(SystemParameterSerializer(updated_qs, many=True).data)
+        return Response(
+            {"detail": "Invalid payload format for bulk parameter update."},
+            status=status.HTTP_400_BAD_REQUEST
+        )
+
