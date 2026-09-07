@@ -12,6 +12,19 @@ router.register(r'module-access', ModuleAccessViewSet, basename='module-access')
 router.register(r'permissions', PagePermissionViewSet, basename='permissions')
 
 urlpatterns = [
+    path('system-parameters/', SystemParameterViewSet.as_view({
+        'get': 'list',
+        'post': 'create',
+        'put': 'bulk_update',
+        'patch': 'bulk_update'
+    }), name='system-parameters-root'),
+    path('settings/', SystemParameterViewSet.as_view({
+        'get': 'list',
+        'post': 'create',
+        'put': 'bulk_update',
+        'patch': 'bulk_update'
+    }), name='settings-root'),
     path('', include(router.urls)),
 ]
+
 

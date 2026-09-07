@@ -56,7 +56,55 @@ class PersonDetailSerializer(serializers.ModelSerializer):
             else:
                 mapped_data['biometric_id'] = str(bio).strip()
 
+        company_id = mapped_data.get('company_id') or mapped_data.get('companyId')
+        if company_id and not mapped_data.get('company_name'):
+            try:
+                from organization.models import Company
+                comp = Company.objects.filter(id=company_id).first()
+                if comp:
+                    mapped_data['company_name'] = comp.name
+            except Exception:
+                pass
+
+        dept_id = mapped_data.get('department_id') or mapped_data.get('departmentId')
+        if dept_id and not mapped_data.get('department_name'):
+            try:
+                from organization.models import Department
+                dept = Department.objects.filter(id=dept_id).first()
+                if dept:
+                    mapped_data['department_name'] = dept.name
+            except Exception:
+                pass
+
         return super().to_internal_value(mapped_data)
+
+    def create(self, validated_data):
+        user_id = self.initial_data.get('user_id') or self.initial_data.get('userId')
+        username = self.initial_data.get('username')
+        if not validated_data.get('user'):
+            if user_id:
+                user = User.objects.filter(id=user_id).first()
+                if user and not getattr(user, 'person', None):
+                    validated_data['user'] = user
+            elif username:
+                user = User.objects.filter(username__iexact=username).first()
+                if user and not getattr(user, 'person', None):
+                    validated_data['user'] = user
+        return super().create(validated_data)
+
+    def update(self, instance, validated_data):
+        if not instance.user:
+            user_id = self.initial_data.get('user_id') or self.initial_data.get('userId')
+            username = self.initial_data.get('username')
+            if user_id:
+                user = User.objects.filter(id=user_id).first()
+                if user and (not getattr(user, 'person', None) or user.person == instance):
+                    instance.user = user
+            elif username:
+                user = User.objects.filter(username__iexact=username).first()
+                if user and (not getattr(user, 'person', None) or user.person == instance):
+                    instance.user = user
+        return super().update(instance, validated_data)
 
 
 
@@ -302,15 +350,18 @@ class RegisterSerializer(serializers.ModelSerializer):
         user.save()
 
         # Link or create a Person profile
-        Person.objects.create(
-            user=user,
-            name=username,
-            person_type='EMPLOYEE',
-            employment_mode='FULL_TIME',
-            rate_type='DAILY',
-            base_rate=0.00,
-            status='ACTIVE'
-        )
+        if not getattr(user, 'person', None):
+            Person.objects.get_or_create(
+                user=user,
+                defaults={
+                    'name': username,
+                    'person_type': 'EMPLOYEE',
+                    'employment_mode': 'FULL_TIME',
+                    'rate_type': 'DAILY',
+                    'base_rate': 0.00,
+                    'status': 'ACTIVE'
+                }
+            )
 
         return user
 
