@@ -7,5 +7,6 @@ router.register(r'companies', CompanyViewSet, basename='companies')
 router.register(r'departments', DepartmentViewSet, basename='departments')
 
 urlpatterns = [
+    path('companies/org-tree', CompanyViewSet.as_view({'get': 'org_tree'}), name='companies_org_tree_no_slash'),
     path('', include(router.urls)),
 ]

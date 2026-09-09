@@ -22,7 +22,19 @@ urlpatterns = [
 
     # Notification endpoints
     path('notifications/', notifications_list_view, name='notifications_list'),
+    path('notifications', notifications_list_view, name='notifications_list_no_slash'),
     path('notifications/unread-count', notifications_unread_count_view, name='notifications_unread_count'),
+    path('notifications/unread-count/', notifications_unread_count_view, name='notifications_unread_count_slash'),
+    path('notifications/read-all', notifications_mark_all_read_view, name='notifications_read_all'),
+    path('notifications/read-all/', notifications_mark_all_read_view, name='notifications_read_all_slash'),
+    path('notifications/<str:pk>/read', notification_mark_read_view, name='notification_mark_read'),
+    path('notifications/<str:pk>/read/', notification_mark_read_view, name='notification_mark_read_slash'),
+    path('notifications/preferences', notification_preferences_view, name='notification_preferences'),
+    path('notifications/preferences/', notification_preferences_view, name='notification_preferences_slash'),
+
+    # Attendance endpoints
+    path('attendance/reset', attendance_reset_view, name='attendance_reset'),
+    path('attendance/reset/', attendance_reset_view, name='attendance_reset_slash'),
 ]
 
 

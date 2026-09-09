@@ -207,3 +207,169 @@ class AccountApprovalTests(TestCase):
         self.assertEqual(detail_str, 'Incorrect password. Please try again.')
 
 
+class NotificationAndAttendanceTests(TestCase):
+    def setUp(self):
+        self.client = APIClient()
+        self.role, _ = Role.objects.get_or_create(code='SUPER_ADMIN', defaults={'name': 'Super Admin'})
+        self.user, _ = User.objects.get_or_create(
+            username='notify_user',
+            defaults={
+                'email': 'notify@example.com',
+                'role': self.role,
+                'approval_status': 'APPROVED',
+                'is_active': True
+            }
+        )
+        self.client.force_authenticate(user=self.user)
+
+        from users.models import Notification
+        self.notif1 = Notification.objects.create(
+            user=self.user,
+            title='Attendance Alert',
+            message='Clock-in missing',
+            is_read=False,
+            category='ATTENDANCE'
+        )
+        self.notif2 = Notification.objects.create(
+            user=self.user,
+            title='Payroll Generated',
+            message='Payroll batch locked',
+            is_read=False,
+            category='PAYROLL'
+        )
+
+    def test_notifications_list_and_unread_count(self):
+        # List
+        res = self.client.get('/api/notifications/')
+        self.assertEqual(res.status_code, status.HTTP_200_OK)
+        self.assertEqual(len(res.data), 2)
+        self.assertEqual(res.data[0]['userId'], str(self.user.id))
+
+        # Unread count
+        count_res = self.client.get('/api/notifications/unread-count')
+        self.assertEqual(count_res.status_code, status.HTTP_200_OK)
+        self.assertEqual(count_res.data['unreadCount'], 2)
+
+    def test_mark_single_notification_read(self):
+        res = self.client.put(f'/api/notifications/{self.notif1.id}/read')
+        self.assertEqual(res.status_code, status.HTTP_200_OK)
+        self.assertTrue(res.data['isRead'])
+
+        count_res = self.client.get('/api/notifications/unread-count')
+        self.assertEqual(count_res.data['unreadCount'], 1)
+
+    def test_mark_all_notifications_read(self):
+        res = self.client.put('/api/notifications/read-all')
+        self.assertEqual(res.status_code, status.HTTP_200_OK)
+        self.assertEqual(res.data['count'], 2)
+
+        count_res = self.client.get('/api/notifications/unread-count')
+        self.assertEqual(count_res.data['unreadCount'], 0)
+
+    def test_notification_preferences_get_and_update(self):
+        # GET default
+        res = self.client.get('/api/notifications/preferences')
+        self.assertEqual(res.status_code, status.HTTP_200_OK)
+        self.assertTrue(res.data['enableInApp'])
+
+        # PUT update
+        update_res = self.client.put('/api/notifications/preferences', {
+            'enableInApp': False,
+            'notifyAttendance': False
+        }, format='json')
+        self.assertEqual(update_res.status_code, status.HTTP_200_OK)
+        self.assertFalse(update_res.data['enableInApp'])
+        self.assertFalse(update_res.data['notifyAttendance'])
+        self.assertTrue(update_res.data['notifyPayroll'])
+
+    def test_attendance_reset(self):
+        # Create a newly imported temporary person
+        Person.objects.create(
+            name='Temp Import Bio',
+            biometric_id='9999',
+            is_newly_imported=True,
+            status='ACTIVE'
+        )
+
+        res = self.client.post('/api/attendance/reset/')
+        self.assertEqual(res.status_code, status.HTTP_200_OK)
+        self.assertEqual(res.data['status'], 'success')
+
+        # Verify person is archived
+        p = Person.objects.get(name='Temp Import Bio')
+        self.assertTrue(p.is_archived)
+
+
+from unittest.mock import patch
+
+class GoogleAuthSecurityTests(TestCase):
+    def setUp(self):
+        self.client = APIClient()
+        self.emp_role, _ = Role.objects.get_or_create(code='EMPLOYEE', defaults={'name': 'Employee'})
+
+    def test_rejects_unverified_raw_email_payload(self):
+        # Attempting to login by passing raw email without a Google token must be rejected
+        response = self.client.post('/api/auth/google-login/', {
+            'email': 'spoofed@example.com',
+            'name': 'Spoofed User'
+        }, format='json')
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn('credential is required', response.data.get('error', '').lower())
+
+    def test_rejects_invalid_google_id_token(self):
+        response = self.client.post('/api/auth/google-login/', {
+            'id_token': 'invalid.fake.jwt_token_payload'
+        }, format='json')
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn('invalid google id token', response.data.get('error', '').lower())
+
+    @patch('google.oauth2.id_token.verify_oauth2_token')
+    def test_google_signup_provisions_pending_user(self, mock_verify):
+        mock_verify.return_value = {
+            'email': 'new_google_user@example.com',
+            'given_name': 'Google',
+            'family_name': 'User',
+            'name': 'Google User',
+            'email_verified': True
+        }
+
+        response = self.client.post('/api/auth/google-login/', {
+            'id_token': 'valid_simulated_jwt_token'
+        }, format='json')
+
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        self.assertTrue(response.data.get('is_new_user'))
+        self.assertEqual(response.data.get('approval_status'), 'PENDING')
+
+        user = User.objects.get(email='new_google_user@example.com')
+        self.assertEqual(user.approval_status, 'PENDING')
+        self.assertFalse(user.is_active)
+        self.assertTrue(Person.objects.filter(user=user).exists())
+
+    @patch('google.oauth2.id_token.verify_oauth2_token')
+    def test_google_login_approved_user(self, mock_verify):
+        mock_verify.return_value = {
+            'email': 'existing_user@example.com',
+            'name': 'Existing Verified User',
+            'email_verified': True
+        }
+
+        user = User.objects.create(
+            username='existing_google',
+            email='existing_user@example.com',
+            role=self.emp_role,
+            approval_status='APPROVED',
+            is_active=True
+        )
+
+        response = self.client.post('/api/auth/google-login/', {
+            'id_token': 'valid_simulated_jwt_token'
+        }, format='json')
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertIn('access', response.data)
+        self.assertFalse(response.data.get('is_new_user'))
+
+
+
+

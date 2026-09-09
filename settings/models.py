@@ -81,3 +81,7 @@ class ModuleAccess(BaseModel):
     def __str__(self):
         return f"[{self.module}] {self.name} ({self.code})"
 
+
+from audit.models import AuditLog
+
+
