@@ -52,3 +52,64 @@ class SystemParameterAPITests(TestCase):
         param_dict = {p['key']: p['value'] for p in response.data}
         self.assertEqual(param_dict['currency'], 'EUR')
         self.assertEqual(param_dict['attendance_grace_period'], '30')
+
+
+class AuditLogAPITests(TestCase):
+    def setUp(self):
+        self.role, _ = Role.objects.get_or_create(code='SUPER_ADMIN', defaults={'name': 'Super Admin'})
+        self.user, _ = User.objects.get_or_create(
+            username='audit_admin',
+            defaults={
+                'email': 'audit_admin@test.com',
+                'role': self.role,
+                'approval_status': 'APPROVED',
+                'is_active': True
+            }
+        )
+        self.client = APIClient()
+        self.client.force_authenticate(user=self.user)
+
+        from settings.models import AuditLog
+        AuditLog.objects.create(
+            table_name='users',
+            record_id='1001',
+            action='CREATE',
+            changed_by='audit_admin',
+            new_data='{"username": "test1"}'
+        )
+        AuditLog.objects.create(
+            table_name='attendance_records',
+            record_id='2002',
+            action='RESET',
+            changed_by='audit_admin',
+            new_data='Database reset'
+        )
+        AuditLog.objects.create(
+            table_name='roles',
+            record_id='3003',
+            action='UPDATE',
+            changed_by='other_admin',
+            new_data='{"role": "HR_MANAGER"}'
+        )
+
+    def test_get_audit_logs_paginated(self):
+        response = self.client.get('/api/audit-logs/?page=1&limit=2')
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data['total'], 3)
+        self.assertEqual(response.data['page'], 1)
+        self.assertEqual(response.data['limit'], 2)
+        self.assertEqual(len(response.data['logs']), 2)
+
+    def test_filter_by_table_and_action(self):
+        response = self.client.get('/api/audit-logs/?tableName=attendance_records&action=RESET')
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data['total'], 1)
+        self.assertEqual(response.data['logs'][0]['tableName'], 'attendance_records')
+        self.assertEqual(response.data['logs'][0]['action'], 'RESET')
+
+    def test_filter_by_changed_by_and_search(self):
+        response = self.client.get('/api/audit-logs/?changedBy=audit_admin&search=test1')
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data['total'], 1)
+        self.assertEqual(response.data['logs'][0]['recordId'], '1001')
+

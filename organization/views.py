@@ -32,6 +32,10 @@ class CompanyViewSet(viewsets.ModelViewSet):
         departments = company.departments.filter(is_archived=False)
         return Response(DepartmentSerializer(departments, many=True).data)
 
+    def update(self, request, *args, **kwargs):
+        kwargs['partial'] = True
+        return super().update(request, *args, **kwargs)
+
     def destroy(self, request, *args, **kwargs):
         company = self.get_object()
         company.archive(user_identifier=request.user.username)
@@ -46,6 +50,10 @@ class DepartmentViewSet(viewsets.ModelViewSet):
     serializer_class = DepartmentSerializer
     permission_classes = [permissions.IsAuthenticated]
     pagination_class = None
+
+    def update(self, request, *args, **kwargs):
+        kwargs['partial'] = True
+        return super().update(request, *args, **kwargs)
 
     def destroy(self, request, *args, **kwargs):
         department = self.get_object()

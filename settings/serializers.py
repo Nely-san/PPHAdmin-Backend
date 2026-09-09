@@ -1,5 +1,5 @@
 from rest_framework import serializers
-from settings.models import SystemParameter, ModuleAccess
+from settings.models import SystemParameter, ModuleAccess, AuditLog
 from users.models import Role, PagePermission
 
 class SystemParameterSerializer(serializers.ModelSerializer):
@@ -154,3 +154,7 @@ class RoleSerializer(serializers.ModelSerializer):
             perms = self._resolve_permissions(permission_codes)
             instance.permissions.set(perms)
         return instance
+
+
+from audit.serializers import AuditLogSerializer
+

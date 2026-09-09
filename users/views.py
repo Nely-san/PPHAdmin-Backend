@@ -1,5 +1,9 @@
+import requests
+from django.conf import settings
 from django.db.models import Case, When, Value, IntegerField
 from django.utils import timezone
+from google.oauth2 import id_token
+from google.auth.transport import requests as google_requests
 from rest_framework import viewsets, permissions, status
 from rest_framework.views import APIView
 from rest_framework.decorators import action, api_view, permission_classes
@@ -7,13 +11,15 @@ from rest_framework.response import Response
 from rest_framework_simplejwt.views import TokenObtainPairView
 from rest_framework_simplejwt.tokens import RefreshToken
 
-from users.models import User, Person, Role, PagePermission
+from users.models import User, Person, Role, PagePermission, Notification, NotificationPreference
 from users.serializers import (
     UserProfileSerializer,
     PersonDetailSerializer,
     CustomTokenObtainPairSerializer,
     RegisterSerializer,
-    AccountApprovalSerializer
+    AccountApprovalSerializer,
+    NotificationSerializer,
+    NotificationPreferenceSerializer
 )
 
 ROLE_ORDER_MAP = {
@@ -332,39 +338,77 @@ class ChangePasswordView(APIView):
 class GoogleLoginView(APIView):
     """
     Endpoint for Google Sign-In and Sign-Up.
-    Handles Google OAuth2 authentication by receiving user credentials from the frontend,
+    Cryptographically verifies the Google ID Token (or access token) before authenticating,
     matching with existing accounts, or auto-provisioning a new Employee User and Person profile.
-
-    -----------------------------------------------------------------------------------------
-    HOW TO CONNECT TO GOOGLE (BACKEND SETUP):
-    -----------------------------------------------------------------------------------------
-    1. The frontend initiates Google Sign-In and obtains Google credentials (or ID token).
-    2. The frontend sends POST /api/auth/google-login/ with { email, first_name, last_name, name }.
-    3. (OPTIONAL ENHANCEMENT - Server-side ID Token Verification):
-       If you pass `id_token` or `credential` from the frontend, you can verify it directly with Google:
-       
-       ```python
-       from google.oauth2 import id_token
-       from google.auth.transport import requests as google_requests
-       from django.conf import settings
-
-       # idinfo = id_token.verify_oauth2_token(token, google_requests.Request(), settings.GOOGLE_CLIENT_ID)
-       # email = idinfo['email']
-       # name = idinfo.get('name')
-       ```
-    -----------------------------------------------------------------------------------------
     """
     permission_classes = [permissions.AllowAny]
 
     def post(self, request):
-        # Extract Google profile data sent from the frontend
-        email = request.data.get('email', '').strip().lower()
-        first_name = request.data.get('first_name', '').strip()
-        last_name = request.data.get('last_name', '').strip()
-        name = request.data.get('name', '').strip() or f"{first_name} {last_name}".strip()
+        raw_token = (
+            request.data.get('id_token') or
+            request.data.get('credential') or
+            request.data.get('token')
+        )
+        access_token = request.data.get('access_token')
+
+        email = None
+        first_name = ''
+        last_name = ''
+        name = ''
+
+        if raw_token:
+            try:
+                google_client_id = getattr(settings, 'GOOGLE_CLIENT_ID', None)
+                audience = google_client_id if (google_client_id and not google_client_id.startswith('YOUR_')) else None
+                idinfo = id_token.verify_oauth2_token(
+                    raw_token,
+                    google_requests.Request(),
+                    audience=audience
+                )
+
+                email = idinfo.get('email', '').strip().lower()
+                first_name = idinfo.get('given_name', '').strip()
+                last_name = idinfo.get('family_name', '').strip()
+                name = idinfo.get('name', '').strip() or f"{first_name} {last_name}".strip()
+                email_verified = idinfo.get('email_verified', True)
+
+                if not email_verified:
+                    return Response({'error': 'Google email is not verified.'}, status=status.HTTP_400_BAD_REQUEST)
+            except Exception as e:
+                return Response(
+                    {'error': f'Invalid Google ID token signature or token expired: {str(e)}'},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+        elif access_token:
+            try:
+                userinfo_res = requests.get(
+                    'https://www.googleapis.com/oauth2/v3/userinfo',
+                    headers={'Authorization': f'Bearer {access_token}'},
+                    timeout=10
+                )
+                if userinfo_res.status_code != 200:
+                    return Response({'error': 'Failed to verify Google access token.'}, status=status.HTTP_400_BAD_REQUEST)
+                idinfo = userinfo_res.json()
+                email = idinfo.get('email', '').strip().lower()
+                first_name = idinfo.get('given_name', '').strip()
+                last_name = idinfo.get('family_name', '').strip()
+                name = idinfo.get('name', '').strip() or f"{first_name} {last_name}".strip()
+                email_verified = idinfo.get('email_verified', True)
+                if not email_verified:
+                    return Response({'error': 'Google email is not verified.'}, status=status.HTTP_400_BAD_REQUEST)
+            except Exception as e:
+                return Response(
+                    {'error': f'Failed to verify Google access token: {str(e)}'},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+        else:
+            return Response(
+                {'error': 'Google ID token or valid OAuth credential is required for authentication.'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
 
         if not email:
-            return Response({'error': 'Email is required.'}, status=status.HTTP_400_BAD_REQUEST)
+            return Response({'error': 'Email could not be verified from Google credentials.'}, status=status.HTTP_400_BAD_REQUEST)
 
         user = User.objects.filter(email__iexact=email, is_archived=False).first()
         is_new_user = False
@@ -396,17 +440,22 @@ class GoogleLoginView(APIView):
             user.set_unusable_password()
             user.save()
 
-            # Create corresponding personnel HR profile
+            # Update or create corresponding personnel HR profile
             display_name = name if name else username
-            Person.objects.create(
-                user=user,
-                name=display_name,
-                person_type='EMPLOYEE',
-                employment_mode='FULL_TIME',
-                rate_type='DAILY',
-                base_rate=0.00,
-                status='ACTIVE'
-            )
+            person = Person.objects.filter(user=user).first()
+            if person:
+                person.name = display_name
+                person.save(update_fields=['name'])
+            else:
+                Person.objects.create(
+                    user=user,
+                    name=display_name,
+                    person_type='EMPLOYEE',
+                    employment_mode='FULL_TIME',
+                    rate_type='DAILY',
+                    base_rate=0.00,
+                    status='ACTIVE'
+                )
 
             serializer = UserProfileSerializer(user)
             return Response({
@@ -450,15 +499,99 @@ class GoogleLoginView(APIView):
 @api_view(['GET'])
 @permission_classes([permissions.IsAuthenticated])
 def notifications_list_view(request):
-    """Returns the list of notifications for the current authenticated user."""
-    return Response([])
+    """
+    Returns the list of notifications for the current authenticated user.
+    Supports cursor-based and limit-based pagination.
+    """
+    qs = Notification.objects.filter(user=request.user, is_archived=False).order_by('-created_at')
+
+    cursor = request.query_params.get('cursor')
+    if cursor:
+        cursor_item = Notification.objects.filter(id=cursor).first()
+        if cursor_item:
+            qs = qs.filter(created_at__lt=cursor_item.created_at)
+
+    limit = request.query_params.get('limit')
+    try:
+        limit = int(limit) if limit else 20
+        if limit < 1:
+            limit = 20
+    except (ValueError, TypeError):
+        limit = 20
+
+    notifications = qs[:limit]
+    serializer = NotificationSerializer(notifications, many=True)
+    return Response(serializer.data)
 
 
 @api_view(['GET'])
 @permission_classes([permissions.IsAuthenticated])
 def notifications_unread_count_view(request):
     """Returns the unread notifications count for the current authenticated user."""
-    return Response({"unreadCount": 0})
+    count = Notification.objects.filter(user=request.user, is_read=False, is_archived=False).count()
+    return Response({"unreadCount": count})
+
+
+@api_view(['PUT', 'POST'])
+@permission_classes([permissions.IsAuthenticated])
+def notification_mark_read_view(request, pk=None):
+    """Marks a specific notification as read."""
+    notification = Notification.objects.filter(id=pk, user=request.user, is_archived=False).first()
+    if not notification:
+        return Response({'detail': 'Notification not found.'}, status=status.HTTP_404_NOT_FOUND)
+    notification.is_read = True
+    notification.save(update_fields=['is_read', 'updated_at'])
+    return Response(NotificationSerializer(notification).data)
+
+
+@api_view(['PUT', 'POST'])
+@permission_classes([permissions.IsAuthenticated])
+def notifications_mark_all_read_view(request):
+    """Marks all unread notifications for the user as read."""
+    unread_qs = Notification.objects.filter(user=request.user, is_read=False, is_archived=False)
+    count = unread_qs.count()
+    unread_qs.update(is_read=True)
+    return Response({"status": "success", "count": count})
+
+
+@api_view(['GET', 'PUT', 'PATCH'])
+@permission_classes([permissions.IsAuthenticated])
+def notification_preferences_view(request):
+    """Retrieves or updates notification preferences for current user."""
+    pref, _ = NotificationPreference.objects.get_or_create(user=request.user)
+    if request.method in ['PUT', 'PATCH']:
+        serializer = NotificationPreferenceSerializer(pref, data=request.data, partial=True)
+        serializer.is_valid(raise_exception=True)
+        serializer.save()
+        return Response(serializer.data)
+    return Response(NotificationPreferenceSerializer(pref).data)
+
+
+@api_view(['POST'])
+@permission_classes([permissions.IsAuthenticated])
+def attendance_reset_view(request):
+    """
+    Resets biometric attendance logs and cleans out imported temporary accounts.
+    Logs audit trail event.
+    """
+    imported_persons = Person.objects.filter(is_newly_imported=True, is_archived=False)
+    count = imported_persons.count()
+    for p in imported_persons:
+        p.archive(user_identifier=request.user.username)
+
+    from settings.models import AuditLog
+    AuditLog.objects.create(
+        table_name='attendance_records',
+        action='RESET',
+        changed_by=request.user.username,
+        new_data=f"Attendance and biometrics vault reset. {count} newly imported temporary record(s) archived."
+    )
+
+    return Response({
+        'status': 'success',
+        'message': f'Attendance records reset cleanly. {count} temporary imported record(s) purged.'
+    }, status=status.HTTP_200_OK)
+
 
 
 

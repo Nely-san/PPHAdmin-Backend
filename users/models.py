@@ -246,3 +246,48 @@ def ensure_person_for_user(sender, instance, created, **kwargs):
                 )
     except Exception:
         pass
+
+
+class Notification(BaseModel):
+    """
+    In-app user notification items.
+    """
+    PRIORITY_CHOICES = [
+        ('LOW', 'Low'),
+        ('MEDIUM', 'Medium'),
+        ('HIGH', 'High'),
+        ('CRITICAL', 'Critical'),
+    ]
+
+    user = models.ForeignKey(User, on_delete=models.CASCADE, related_name='notifications')
+    title = models.CharField(max_length=255)
+    message = models.TextField()
+    is_read = models.BooleanField(default=False, db_index=True)
+    category = models.CharField(max_length=50, default='SYSTEM')
+    priority = models.CharField(max_length=20, choices=PRIORITY_CHOICES, default='MEDIUM')
+    action_url = models.CharField(max_length=255, null=True, blank=True)
+
+    class Meta:
+        db_table = 'notifications'
+        ordering = ['-created_at']
+
+    def __str__(self):
+        return f"[{self.category}] {self.title} ({self.user.username})"
+
+
+class NotificationPreference(BaseModel):
+    """
+    User notification delivery and module subscription preferences.
+    """
+    user = models.OneToOneField(User, on_delete=models.CASCADE, related_name='notification_preference')
+    enable_in_app = models.BooleanField(default=True)
+    notify_attendance = models.BooleanField(default=True)
+    notify_payroll = models.BooleanField(default=True)
+    notify_leave = models.BooleanField(default=True)
+
+    class Meta:
+        db_table = 'notification_preferences'
+
+    def __str__(self):
+        return f"Preferences for {self.user.username}"
+

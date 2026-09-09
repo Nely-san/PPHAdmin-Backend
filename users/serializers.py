@@ -1,6 +1,6 @@
 from rest_framework import serializers
 from rest_framework_simplejwt.serializers import TokenObtainPairSerializer
-from users.models import User, Role, PagePermission, Person
+from users.models import User, Role, PagePermission, Person, Notification, NotificationPreference
 
 from settings.serializers import PagePermissionSerializer, RoleSerializer
 
@@ -389,4 +389,44 @@ class AccountApprovalSerializer(serializers.Serializer):
                 "role": "A role must be assigned when approving an account."
             })
         return attrs
+
+
+class NotificationSerializer(serializers.ModelSerializer):
+    userId = serializers.CharField(source='user.id', read_only=True)
+    isRead = serializers.BooleanField(source='is_read')
+    actionUrl = serializers.CharField(source='action_url', allow_null=True, required=False)
+    createdAt = serializers.DateTimeField(source='created_at', read_only=True)
+    updatedAt = serializers.DateTimeField(source='updated_at', read_only=True)
+
+    class Meta:
+        model = Notification
+        fields = [
+            'id', 'userId', 'title', 'message', 'isRead',
+            'category', 'priority', 'actionUrl', 'createdAt', 'updatedAt'
+        ]
+
+
+class NotificationPreferenceSerializer(serializers.ModelSerializer):
+    enableInApp = serializers.BooleanField(source='enable_in_app', required=False)
+    notifyAttendance = serializers.BooleanField(source='notify_attendance', required=False)
+    notifyPayroll = serializers.BooleanField(source='notify_payroll', required=False)
+    notifyLeave = serializers.BooleanField(source='notify_leave', required=False)
+
+    class Meta:
+        model = NotificationPreference
+        fields = ['enableInApp', 'notifyAttendance', 'notifyPayroll', 'notifyLeave']
+
+    def to_internal_value(self, data):
+        mapped_data = data.copy() if hasattr(data, 'copy') else dict(data)
+        camel_to_snake = {
+            'enableInApp': 'enable_in_app',
+            'notifyAttendance': 'notify_attendance',
+            'notifyPayroll': 'notify_payroll',
+            'notifyLeave': 'notify_leave',
+        }
+        for camel, snake in camel_to_snake.items():
+            if camel in mapped_data and snake not in mapped_data:
+                mapped_data[snake] = mapped_data[camel]
+        return super().to_internal_value(mapped_data)
+
 
