@@ -44,7 +44,18 @@ def calculate_pagibig(monthly_salary):
     return Decimal('50.00')
 
 
-def calculate_person_cutoff_payroll(person, cutoff_start, cutoff_end, method='OPTION_1', working_days_in_cutoff=12):
+def calculate_person_cutoff_payroll(
+    person,
+    cutoff_start,
+    cutoff_end,
+    method='OPTION_1',
+    working_days_in_cutoff=12,
+    include_government_deductions=True,
+    include_tardiness=True,
+    include_sss=True,
+    include_philhealth=True,
+    include_pagibig=True
+):
     """
     Calculates gross pay, deductions (tardiness, SSS, PhilHealth, Pag-IBIG), and net pay
     for an individual person for a specified cutoff period.
@@ -113,18 +124,22 @@ def calculate_person_cutoff_payroll(person, cutoff_start, cutoff_end, method='OP
 
     # Deductions
     tardiness_deduction = Decimal('0.00')
-    if total_tardiness_mins > 0 and hourly_rate > 0:
+    if include_tardiness and total_tardiness_mins > 0 and hourly_rate > 0:
         tardiness_deduction = round_curr((hourly_rate / Decimal('60')) * Decimal(total_tardiness_mins))
 
-    # Statutory Deductions (only apply to Regular Employees with non-zero gross)
+    # Statutory Deductions (only apply to Regular Employees with non-zero gross and enabled statutory deductions)
     sss_deduction = Decimal('0.00')
     philhealth_deduction = Decimal('0.00')
     pagibig_deduction = Decimal('0.00')
 
-    if person.person_type == 'EMPLOYEE' and gross_pay > 0:
-        sss_deduction = calculate_sss(monthly_equivalent)
-        philhealth_deduction = calculate_philhealth(monthly_equivalent)
-        pagibig_deduction = calculate_pagibig(monthly_equivalent)
+    person_has_gov = getattr(person, 'has_government_deductions', True)
+    if include_government_deductions and person_has_gov and person.person_type == 'EMPLOYEE' and gross_pay > 0:
+        if include_sss:
+            sss_deduction = calculate_sss(monthly_equivalent)
+        if include_philhealth:
+            philhealth_deduction = calculate_philhealth(monthly_equivalent)
+        if include_pagibig:
+            pagibig_deduction = calculate_pagibig(monthly_equivalent)
 
     total_deductions = tardiness_deduction + sss_deduction + philhealth_deduction + pagibig_deduction
     net_pay = max(Decimal('0.00'), gross_pay - total_deductions)
@@ -185,11 +200,24 @@ def calculate_person_cutoff_payroll(person, cutoff_start, cutoff_end, method='OP
     }
 
 
-def run_cutoff_payroll_batch(cutoff_start, cutoff_end, method='OPTION_1', person_ids=None, department_id=None, company_id=None):
+def run_cutoff_payroll_batch(
+    cutoff_start,
+    cutoff_end,
+    method='OPTION_1',
+    person_ids=None,
+    department_id=None,
+    company_id=None,
+    include_government_deductions=True,
+    include_tardiness=True,
+    include_sss=True,
+    include_philhealth=True,
+    include_pagibig=True
+):
     """
-    Executes batch payroll calculation across active personnel for a cutoff window.
+    Executes batch payroll calculation across active personnel with positive base rates for a cutoff window.
+    Personnel with base_rate = 0 (such as unpaid OJTs) are excluded.
     """
-    persons = Person.objects.filter(is_archived=False, status='ACTIVE')
+    persons = Person.objects.filter(is_archived=False, status='ACTIVE', base_rate__gt=Decimal('0.00'))
     if person_ids:
         persons = persons.filter(id__in=person_ids)
     if department_id:
@@ -204,7 +232,12 @@ def run_cutoff_payroll_batch(cutoff_start, cutoff_end, method='OPTION_1', person
                 person=person,
                 cutoff_start=cutoff_start,
                 cutoff_end=cutoff_end,
-                method=method
+                method=method,
+                include_government_deductions=include_government_deductions,
+                include_tardiness=include_tardiness,
+                include_sss=include_sss,
+                include_philhealth=include_philhealth,
+                include_pagibig=include_pagibig
             )
 
             # Update or create PayrollRecord

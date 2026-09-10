@@ -299,8 +299,51 @@ class NotificationAndAttendanceTests(TestCase):
         p = Person.objects.get(name='Temp Import Bio')
         self.assertTrue(p.is_archived)
 
+    def test_archive_and_restore_user_account_via_patch_and_endpoint(self):
+        emp_role, _ = Role.objects.get_or_create(code='EMPLOYEE', defaults={'name': 'Employee'})
+        # Create a regular active user
+        target_user = User.objects.create_user(
+            username='staff_member',
+            password='Password123!',
+            role=emp_role,
+            is_active=True,
+            approval_status='APPROVED'
+        )
+        self.client.force_authenticate(user=self.user)
 
-from unittest.mock import patch
+        # 1. Archive via PATCH with isArchived / is_archived
+        patch_res = self.client.patch(f'/api/users/{target_user.id}/', {
+            'isArchived': True
+        }, format='json')
+        self.assertEqual(patch_res.status_code, status.HTTP_200_OK)
+        target_user.refresh_from_db()
+        self.assertTrue(target_user.is_archived)
+        self.assertIsNotNone(target_user.archived_at)
+
+        # 2. Restore via PATCH
+        patch_res2 = self.client.patch(f'/api/users/{target_user.id}/', {
+            'isArchived': False
+        }, format='json')
+        self.assertEqual(patch_res2.status_code, status.HTTP_200_OK)
+        target_user.refresh_from_db()
+        self.assertFalse(target_user.is_archived)
+        self.assertIsNone(target_user.archived_at)
+
+        # 3. Archive via POST /archive/
+        archive_res = self.client.post(f'/api/users/{target_user.id}/archive/')
+        self.assertEqual(archive_res.status_code, status.HTTP_200_OK)
+        target_user.refresh_from_db()
+        self.assertTrue(target_user.is_archived)
+
+        # 4. Unarchive via POST /unarchive/
+        unarchive_res = self.client.post(f'/api/users/{target_user.id}/unarchive/')
+        self.assertEqual(unarchive_res.status_code, status.HTTP_200_OK)
+        target_user.refresh_from_db()
+        self.assertFalse(target_user.is_archived)
+
+
+from unittest.mock import patch, MagicMock
+from users import views as user_views
 
 class GoogleAuthSecurityTests(TestCase):
     def setUp(self):
@@ -323,36 +366,38 @@ class GoogleAuthSecurityTests(TestCase):
         self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
         self.assertIn('invalid google id token', response.data.get('error', '').lower())
 
-    @patch('google.oauth2.id_token.verify_oauth2_token')
-    def test_google_signup_provisions_pending_user(self, mock_verify):
-        mock_verify.return_value = {
+    def test_google_signup_provisions_pending_user(self):
+        mock_id_token = MagicMock()
+        mock_id_token.verify_oauth2_token.return_value = {
             'email': 'new_google_user@example.com',
             'given_name': 'Google',
             'family_name': 'User',
             'name': 'Google User',
             'email_verified': True
         }
+        mock_google_requests = MagicMock()
+        with patch.object(user_views, 'id_token', mock_id_token), patch.object(user_views, 'google_requests', mock_google_requests):
+            response = self.client.post('/api/auth/google-login/', {
+                'id_token': 'valid_simulated_jwt_token'
+            }, format='json')
 
-        response = self.client.post('/api/auth/google-login/', {
-            'id_token': 'valid_simulated_jwt_token'
-        }, format='json')
+            self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+            self.assertTrue(response.data.get('is_new_user'))
+            self.assertEqual(response.data.get('approval_status'), 'PENDING')
 
-        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
-        self.assertTrue(response.data.get('is_new_user'))
-        self.assertEqual(response.data.get('approval_status'), 'PENDING')
+            user = User.objects.get(email='new_google_user@example.com')
+            self.assertEqual(user.approval_status, 'PENDING')
+            self.assertFalse(user.is_active)
+            self.assertTrue(Person.objects.filter(user=user).exists())
 
-        user = User.objects.get(email='new_google_user@example.com')
-        self.assertEqual(user.approval_status, 'PENDING')
-        self.assertFalse(user.is_active)
-        self.assertTrue(Person.objects.filter(user=user).exists())
-
-    @patch('google.oauth2.id_token.verify_oauth2_token')
-    def test_google_login_approved_user(self, mock_verify):
-        mock_verify.return_value = {
+    def test_google_login_approved_user(self):
+        mock_id_token = MagicMock()
+        mock_id_token.verify_oauth2_token.return_value = {
             'email': 'existing_user@example.com',
             'name': 'Existing Verified User',
             'email_verified': True
         }
+        mock_google_requests = MagicMock()
 
         user = User.objects.create(
             username='existing_google',
@@ -362,14 +407,84 @@ class GoogleAuthSecurityTests(TestCase):
             is_active=True
         )
 
-        response = self.client.post('/api/auth/google-login/', {
-            'id_token': 'valid_simulated_jwt_token'
+        with patch.object(user_views, 'id_token', mock_id_token), patch.object(user_views, 'google_requests', mock_google_requests):
+            response = self.client.post('/api/auth/google-login/', {
+                'id_token': 'valid_simulated_jwt_token'
+            }, format='json')
+
+            self.assertEqual(response.status_code, status.HTTP_200_OK)
+            self.assertIn('access', response.data)
+            self.assertFalse(response.data.get('is_new_user'))
+
+
+class UserManagementSchoolTests(TestCase):
+    def setUp(self):
+        self.client = APIClient()
+        self.sa_role, _ = Role.objects.get_or_create(code='SUPER_ADMIN', defaults={'name': 'Super Admin', 'is_system_role': True})
+        self.ojt_role, _ = Role.objects.get_or_create(code='OJT', defaults={'name': 'OJT / Intern', 'is_system_role': False})
+        self.emp_role, _ = Role.objects.get_or_create(code='EMPLOYEE', defaults={'name': 'Employee', 'is_system_role': False})
+
+        self.super_admin = User.objects.create_superuser(
+            username='admin_boss',
+            password='Password123!'
+        )
+        self.client.force_authenticate(user=self.super_admin)
+
+    def test_create_ojt_user_saves_school_name(self):
+        response = self.client.post('/api/users/', {
+            'username': 'ojt_user_test',
+            'email': 'ojt@university.edu',
+            'password': 'Password123!',
+            'role': 'OJT',
+            'school_name': 'Polytechnic University of the Philippines'
         }, format='json')
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
 
+        user = User.objects.get(username='ojt_user_test')
+        self.assertEqual(user.role.code, 'OJT')
+        self.assertIsNotNone(user.person)
+        self.assertEqual(user.person.school_name, 'Polytechnic University of the Philippines')
+        self.assertEqual(user.person.person_type, 'OJT')
+
+    def test_create_ojt_user_with_linked_person_saves_school_name(self):
+        person = Person.objects.create(
+            name='Jane Doe',
+            person_type='EMPLOYEE',
+            status='ACTIVE'
+        )
+
+        response = self.client.post('/api/users/', {
+            'username': 'janedoe',
+            'email': 'janedoe@university.edu',
+            'password': 'Password123!',
+            'role': 'OJT',
+            'person_id': str(person.id),
+            'school_name': 'University of the Philippines'
+        }, format='json')
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+
+        user = User.objects.get(username='janedoe')
+        person.refresh_from_db()
+        self.assertEqual(person.user, user)
+        self.assertEqual(person.school_name, 'University of the Philippines')
+        self.assertEqual(person.person_type, 'OJT')
+
+    def test_update_user_updates_school_name(self):
+        user = User.objects.create(
+            username='update_school_user',
+            email='school@test.com',
+            role=self.ojt_role,
+            approval_status='APPROVED',
+            is_active=True
+        )
+        person = user.person
+        person.school_name = 'Old University'
+        person.save()
+
+        response = self.client.patch(f'/api/users/{user.id}/', {
+            'schoolName': 'New University of Science and Tech'
+        }, format='json')
         self.assertEqual(response.status_code, status.HTTP_200_OK)
-        self.assertIn('access', response.data)
-        self.assertFalse(response.data.get('is_new_user'))
 
-
-
-
+        person.refresh_from_db()
+        self.assertEqual(person.school_name, 'New University of Science and Tech')

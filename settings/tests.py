@@ -70,6 +70,7 @@ class AuditLogAPITests(TestCase):
         self.client.force_authenticate(user=self.user)
 
         from settings.models import AuditLog
+        AuditLog.objects.all().delete()
         AuditLog.objects.create(
             table_name='users',
             record_id='1001',

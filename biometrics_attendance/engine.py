@@ -5,8 +5,15 @@ from datetime import datetime, date, time, timedelta
 from decimal import Decimal
 from django.utils import timezone
 from django.db import transaction
-import openpyxl
-import xlrd
+try:
+    import openpyxl
+except ImportError:
+    openpyxl = None
+
+try:
+    import xlrd
+except ImportError:
+    xlrd = None
 
 from users.models import Person
 from scheduling.models import Shift, Schedule
@@ -276,26 +283,53 @@ def compute_daily_attendance(person, record_date, am_in_t, am_out_t, pm_in_t, pm
     actual_hours = round(Decimal(worked_mins) / Decimal(60), 2)
     actual_hours = min(actual_hours, required_hours)
 
-    # 4. Overtime calculation
+    # 4. Early Leave (Undertime) & Overtime calculation
+    early_leave_mins = 0
+    if dt_pm_out and shift_end_dt and dt_pm_out < shift_end_dt and not (shift and shift.is_flexible):
+        early_leave_mins = max(0, int((shift_end_dt - dt_pm_out).total_seconds() / 60))
+
     ot_mins = 0
     if dt_ot_in and dt_ot_out and dt_ot_out > dt_ot_in:
         ot_mins = int((dt_ot_out - dt_ot_in).total_seconds() / 60)
     elif dt_pm_out and shift_end_dt and dt_pm_out > shift_end_dt:
         ot_mins = int((dt_pm_out - shift_end_dt).total_seconds() / 60)
 
-    # 5. Status Determination
+    # 5. Status & Anomaly Determination
     status = 'PRESENT'
     is_abnormal = False
+    is_absent = False
+    anomaly_reason = None
+
     if not dt_am_in and not dt_pm_out:
         status = 'ABSENT'
+        is_absent = True
+        is_abnormal = True
+        actual_hours = Decimal('0.00')
+        anomaly_reason = 'Unexcused absence / no biometric clocking'
+    elif not dt_am_in and dt_pm_out:
+        status = 'PRESENT'
+        is_abnormal = True
+        anomaly_reason = 'Missing AM clock-in punch'
+    elif dt_am_in and not dt_pm_out:
+        status = 'PRESENT'
+        is_abnormal = True
+        anomaly_reason = 'Missing PM clock-out punch'
+    elif tardiness_mins > 0 and early_leave_mins > 0:
+        status = 'LATE'
+        is_abnormal = True
+        anomaly_reason = f"Late arrival ({tardiness_mins} mins) & early departure ({early_leave_mins} mins)"
     elif tardiness_mins > 0:
         status = 'LATE'
         is_abnormal = True
+        anomaly_reason = f"Late arrival ({tardiness_mins} mins)"
+    elif early_leave_mins > 0:
+        status = 'PRESENT'
+        is_abnormal = True
+        anomaly_reason = f"Early departure ({early_leave_mins} mins)"
     elif actual_hours < (required_hours / Decimal(2)):
         status = 'HALF_DAY'
         is_abnormal = True
-    elif (dt_am_in and not dt_pm_out) or (not dt_am_in and dt_pm_out):
-        is_abnormal = True
+        anomaly_reason = f"Half day rendered ({actual_hours} hrs)"
 
     return {
         'am_in': dt_am_in,
@@ -308,11 +342,13 @@ def compute_daily_attendance(person, record_date, am_in_t, am_out_t, pm_in_t, pm
         'required_hours': required_hours,
         'tardiness_minutes': tardiness_mins,
         'tardiness_count': 1 if tardiness_mins > 0 else 0,
-        'early_leave_minutes': 0,
-        'early_leave_count': 0,
+        'early_leave_minutes': early_leave_mins,
+        'early_leave_count': 1 if early_leave_mins > 0 else 0,
         'overtime_regular_minutes': ot_mins,
         'status': status,
+        'is_absent': is_absent,
         'is_abnormal': is_abnormal,
+        'anomaly_reason': anomaly_reason,
     }
 
 
@@ -412,6 +448,7 @@ def process_biometric_import(file_obj, file_name, user_identifier='SYSTEM'):
                     'early_leave_count': computed['early_leave_count'],
                     'overtime_regular_minutes': computed['overtime_regular_minutes'],
                     'status': computed['status'],
+                    'is_absent': computed['is_absent'],
                     'is_abnormal': computed['is_abnormal'],
                     'batch': batch,
                     'is_archived': False
@@ -459,8 +496,15 @@ def process_biometric_import(file_obj, file_name, user_identifier='SYSTEM'):
                         'tardiness_minutes': computed['tardiness_minutes'],
                         'early_leave_minutes': computed['early_leave_minutes'],
                         'total_abnormal_minutes': computed['tardiness_minutes'] + computed['early_leave_minutes'],
+                        'reason': computed.get('anomaly_reason') or 'Biometric anomaly detected',
                         'status': 'PENDING'
                     }
+                )
+            else:
+                # If existing exception was pending but record is now normal, resolve it
+                AbnormalClocking.objects.filter(attendance_record=att_record, status='PENDING').update(
+                    status='RESOLVED',
+                    reason='Auto-resolved by biometric log update'
                 )
 
         for p_id, diff in ojt_diffs_by_person.items():

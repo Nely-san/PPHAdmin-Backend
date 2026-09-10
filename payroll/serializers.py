@@ -52,6 +52,11 @@ class PayrollCalculateSerializer(serializers.Serializer):
     person_ids = serializers.ListField(child=serializers.UUIDField(), required=False, default=list)
     department_id = serializers.UUIDField(required=False, allow_null=True)
     company_id = serializers.UUIDField(required=False, allow_null=True)
+    include_government_deductions = serializers.BooleanField(required=False, default=True)
+    include_tardiness = serializers.BooleanField(required=False, default=True)
+    include_sss = serializers.BooleanField(required=False, default=True)
+    include_philhealth = serializers.BooleanField(required=False, default=True)
+    include_pagibig = serializers.BooleanField(required=False, default=True)
 
 
 class PayrollLockSerializer(serializers.Serializer):

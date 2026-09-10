@@ -149,6 +149,21 @@ class User(AbstractBaseUser, PermissionsMixin, BaseModel):
         if self.role and self.role.code == 'SUPER_ADMIN':
             raise ValidationError("The Super Admin account cannot be archived.")
         super().archive(user_identifier=user_identifier)
+        try:
+            person = getattr(self, 'person', None) or Person.objects.filter(user=self).first()
+            if person and not person.is_archived:
+                person.archive(user_identifier=user_identifier)
+        except Exception:
+            pass
+
+    def restore(self):
+        super().restore()
+        try:
+            person = getattr(self, 'person', None) or Person.objects.filter(user=self).first()
+            if person and person.is_archived:
+                person.restore()
+        except Exception:
+            pass
 
 
 class Person(BaseModel):
@@ -183,6 +198,7 @@ class Person(BaseModel):
     employment_mode = models.CharField(max_length=20, choices=EMPLOYMENT_MODE_CHOICES, default='FULL_TIME')
     rate_type = models.CharField(max_length=20, choices=RATE_TYPE_CHOICES, default='DAILY')
     base_rate = models.DecimalField(max_digits=10, decimal_places=2, default=0.00)
+    has_government_deductions = models.BooleanField(default=True, help_text="Whether Government Statutory Deductions apply to this person")
     date_started = models.DateField(null=True, blank=True)
     date_ended = models.DateField(null=True, blank=True)
     status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='ACTIVE')
@@ -215,6 +231,14 @@ class Person(BaseModel):
 
     def __str__(self):
         return f"{self.name} ({self.person_type})"
+
+    def archive(self, user_identifier: str = None):
+        self.status = 'ARCHIVED'
+        super().archive(user_identifier=user_identifier)
+
+    def restore(self):
+        self.status = 'ACTIVE'
+        super().restore()
 
 
 from django.db.models.signals import post_save

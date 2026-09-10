@@ -66,7 +66,12 @@ class PayrollRecordViewSet(viewsets.ModelViewSet):
             method=data.get('method', 'OPTION_1'),
             person_ids=data.get('person_ids'),
             department_id=data.get('department_id'),
-            company_id=data.get('company_id')
+            company_id=data.get('company_id'),
+            include_government_deductions=data.get('include_government_deductions', True),
+            include_tardiness=data.get('include_tardiness', True),
+            include_sss=data.get('include_sss', True),
+            include_philhealth=data.get('include_philhealth', True),
+            include_pagibig=data.get('include_pagibig', True)
         )
 
         return Response({

@@ -5,17 +5,37 @@ from datetime import timedelta
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
 BASE_DIR = Path(__file__).resolve().parent.parent
 
+# Load environment variables from .env if present
+def _load_env_file(filepath: Path):
+    if filepath.is_file():
+        try:
+            with open(filepath, 'r', encoding='utf-8') as f:
+                for line in f:
+                    line = line.strip()
+                    if line and not line.startswith('#') and '=' in line:
+                        k, v = line.split('=', 1)
+                        k = k.strip()
+                        v = v.strip().strip("'\"")
+                        if k and k not in os.environ:
+                            os.environ[k] = v
+        except Exception:
+            pass
+
+_load_env_file(BASE_DIR / '.env')
+_load_env_file(BASE_DIR.parent / '.env')
+
 
 # Quick-start development settings - unsuitable for production
 # See https://docs.djangoproject.com/en/6.1/howto/deployment/checklist/
 
 # SECURITY WARNING: keep the secret key used in production secret!
-SECRET_KEY = 'django-insecure-7z%)b+o3c^82kq@ov5mkw90+@nr%0@0pip8ipmt!n7jo3=fb)n'
+SECRET_KEY = os.environ.get('SECRET_KEY', 'django-insecure-7z%)b+o3c^82kq@ov5mkw90+@nr%0@0pip8ipmt!n7jo3=fb)n')
 
 # SECURITY WARNING: don't run with debug turned on in production!
-DEBUG = True
+DEBUG = os.environ.get('DEBUG', 'True').lower() in ('true', '1', 't')
 
-ALLOWED_HOSTS = []
+_allowed_hosts_str = os.environ.get('ALLOWED_HOSTS', '*')
+ALLOWED_HOSTS = [h.strip() for h in _allowed_hosts_str.split(',') if h.strip()] if _allowed_hosts_str else ['*']
 
 
 # Application definition
@@ -115,19 +135,34 @@ WSGI_APPLICATION = 'config.wsgi.application'
 # Database
 # https://docs.djangoproject.com/en/6.1/ref/settings/#databases
 
-DATABASES = {
-    'default': {
-        'ENGINE': 'django.db.backends.mysql',
-        'NAME': 'pph-2026',
-        'USER': 'root',
-        'PASSWORD': '1234567890',
-        'HOST':'localhost',
-        'PORT':'3306',
-        'OPTIONS': {
-            'init_command': "SET time_zone='+00:00';"
+DB_ENGINE = os.environ.get('DB_ENGINE', 'django.db.backends.mysql')
+DB_NAME = os.environ.get('DB_NAME', 'pph-2026')
+DB_USER = os.environ.get('DB_USER', 'root')
+DB_PASSWORD = os.environ.get('DB_PASSWORD', '1234567890')
+DB_HOST = os.environ.get('DB_HOST', 'localhost')
+DB_PORT = os.environ.get('DB_PORT', '3306')
+
+if os.environ.get('USE_SQLITE', 'False').lower() in ('true', '1', 't') or 'sqlite' in DB_ENGINE:
+    DATABASES = {
+        'default': {
+            'ENGINE': 'django.db.backends.sqlite3',
+            'NAME': BASE_DIR / (DB_NAME if DB_NAME.endswith('.sqlite3') else 'db.sqlite3'),
         }
     }
-}
+else:
+    DATABASES = {
+        'default': {
+            'ENGINE': DB_ENGINE,
+            'NAME': DB_NAME,
+            'USER': DB_USER,
+            'PASSWORD': DB_PASSWORD,
+            'HOST': DB_HOST,
+            'PORT': DB_PORT,
+            'OPTIONS': {
+                'init_command': "SET time_zone='+00:00';"
+            } if 'mysql' in DB_ENGINE else {}
+        }
+    }
 
 
 # Password validation

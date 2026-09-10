@@ -117,3 +117,41 @@ class BiometricsAttendanceTests(APITestCase):
         })
         self.assertEqual(res2.status_code, status.HTTP_200_OK)
         self.assertEqual(res2.data['status'], 'EXCUSED')
+
+    def test_compute_daily_attendance_absent(self):
+        rec_date = date(2026, 3, 4)
+        res = compute_daily_attendance(
+            person=self.person,
+            record_date=rec_date,
+            am_in_t=None,
+            am_out_t=None,
+            pm_in_t=None,
+            pm_out_t=None,
+            ot_in_t=None,
+            ot_out_t=None,
+            shift=self.shift
+        )
+        self.assertEqual(res['status'], 'ABSENT')
+        self.assertTrue(res['is_absent'])
+        self.assertTrue(res['is_abnormal'])
+        self.assertEqual(res['actual_hours'], Decimal('0.00'))
+        self.assertIn('absence', res['anomaly_reason'].lower())
+
+    def test_compute_daily_attendance_missing_punch(self):
+        rec_date = date(2026, 3, 5)
+        # AM In present, PM Out missing
+        res = compute_daily_attendance(
+            person=self.person,
+            record_date=rec_date,
+            am_in_t=time(8, 55),
+            am_out_t=None,
+            pm_in_t=None,
+            pm_out_t=None,
+            ot_in_t=None,
+            ot_out_t=None,
+            shift=self.shift
+        )
+        self.assertEqual(res['status'], 'PRESENT')
+        self.assertTrue(res['is_abnormal'])
+        self.assertIn('missing pm clock-out', res['anomaly_reason'].lower())
+
