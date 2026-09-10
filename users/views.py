@@ -2,8 +2,12 @@ import requests
 from django.conf import settings
 from django.db.models import Case, When, Value, IntegerField
 from django.utils import timezone
-from google.oauth2 import id_token
-from google.auth.transport import requests as google_requests
+try:
+    from google.oauth2 import id_token
+    from google.auth.transport import requests as google_requests
+except ImportError:
+    id_token = None
+    google_requests = None
 from rest_framework import viewsets, permissions, status
 from rest_framework.views import APIView
 from rest_framework.decorators import action, api_view, permission_classes
@@ -95,13 +99,13 @@ class UserViewSet(viewsets.ModelViewSet):
                 status=status.HTTP_400_BAD_REQUEST
             )
         user.archive(user_identifier=request.user.username)
-        return Response({"detail": f"User @{user.username} successfully archived."})
+        return Response(self.get_serializer(user).data)
 
     @action(detail=True, methods=['post'], url_path='unarchive')
     def unarchive_user(self, request, pk=None):
         user = self.get_object()
         user.restore()
-        return Response({"detail": f"User @{user.username} successfully restored."})
+        return Response(self.get_serializer(user).data)
 
     @action(detail=False, methods=['get'], url_path='pending-approvals')
     def pending_approvals(self, request):
@@ -237,21 +241,29 @@ class PersonViewSet(viewsets.ModelViewSet):
     def archive_person(self, request, pk=None):
         person = self.get_object()
         person.archive(user_identifier=request.user.username)
-        return Response({"detail": f"Profile {person.name} archived."})
+        return Response(PersonDetailSerializer(person).data)
 
     @action(detail=True, methods=['post'], url_path='unarchive')
     def unarchive_person(self, request, pk=None):
         person = self.get_object()
         person.restore()
-        return Response({"detail": f"Profile {person.name} restored."})
+        return Response(PersonDetailSerializer(person).data)
 
     @action(detail=True, methods=['patch', 'put'], url_path='ojt-hours')
     def update_ojt_hours(self, request, pk=None):
         person = self.get_object()
+        hours_to_add = request.data.get('hoursToAdd') or request.data.get('hours_to_add')
         rendered = request.data.get('renderedOjtHours') or request.data.get('rendered_ojt_hours')
-        if rendered is not None:
-            person.rendered_ojt_hours = rendered
+        
+        from decimal import Decimal
+        if hours_to_add is not None:
+            current = person.rendered_ojt_hours or Decimal('0.00')
+            person.rendered_ojt_hours = max(Decimal('0.00'), current + Decimal(str(hours_to_add)))
             person.save(update_fields=['rendered_ojt_hours', 'updated_at'])
+        elif rendered is not None:
+            person.rendered_ojt_hours = Decimal(str(rendered))
+            person.save(update_fields=['rendered_ojt_hours', 'updated_at'])
+            
         return Response(PersonDetailSerializer(person).data)
 
 

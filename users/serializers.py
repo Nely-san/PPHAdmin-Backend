@@ -1,3 +1,4 @@
+from django.utils import timezone
 from rest_framework import serializers
 from rest_framework_simplejwt.serializers import TokenObtainPairSerializer
 from users.models import User, Role, PagePermission, Person, Notification, NotificationPreference
@@ -21,7 +22,7 @@ class PersonDetailSerializer(serializers.ModelSerializer):
             'rate_type', 'base_rate', 'date_started', 'date_ended', 'status', 
             'company_name', 'department_name', 'school_name', 'coordinator_contact', 
             'required_ojt_hours', 'rendered_ojt_hours', 'is_newly_imported',
-            'work_setup', 'notes', 'shift_code', 'work_days'
+            'work_setup', 'notes', 'shift_code', 'work_days', 'has_government_deductions'
         ]
 
     def to_internal_value(self, data):
@@ -32,6 +33,7 @@ class PersonDetailSerializer(serializers.ModelSerializer):
             'employmentMode': 'employment_mode',
             'rateType': 'rate_type',
             'baseRate': 'base_rate',
+            'hasGovernmentDeductions': 'has_government_deductions',
             'dateStarted': 'date_started',
             'dateEnded': 'date_ended',
             'companyName': 'company_name',
@@ -121,6 +123,8 @@ class UserProfileSerializer(serializers.ModelSerializer):
     password = serializers.CharField(write_only=True, required=False)
     custom_permissions = PagePermissionSerializer(many=True, read_only=True)
     approved_by_username = serializers.CharField(source='approved_by.username', read_only=True)
+    school_name = serializers.CharField(write_only=True, required=False, allow_null=True, allow_blank=True)
+    schoolName = serializers.CharField(write_only=True, required=False, allow_null=True, allow_blank=True)
 
     class Meta:
         model = User
@@ -128,7 +132,8 @@ class UserProfileSerializer(serializers.ModelSerializer):
             'id', 'username', 'email', 'role', 'role_detail', 'allowed_pages', 'navigation',
             'role_code', 'role_id', 'person', 'password', 'is_active', 'is_staff', 
             'approval_status', 'rejection_reason', 'approved_by', 'approved_by_username',
-            'approved_at', 'custom_permissions', 'is_archived', 'created_at'
+            'approved_at', 'custom_permissions', 'is_archived', 'created_at',
+            'school_name', 'schoolName'
         ]
 
     def get_role(self, obj):
@@ -156,9 +161,24 @@ class UserProfileSerializer(serializers.ModelSerializer):
 
 
     def to_internal_value(self, data):
-        ret = super().to_internal_value(data)
+        mapped_data = data.copy() if hasattr(data, 'copy') else dict(data)
+        if 'schoolName' in mapped_data and 'school_name' not in mapped_data:
+            mapped_data['school_name'] = mapped_data['schoolName']
+        if 'isArchived' in mapped_data and 'is_archived' not in mapped_data:
+            mapped_data['is_archived'] = mapped_data['isArchived']
+        if 'isActive' in mapped_data and 'is_active' not in mapped_data:
+            mapped_data['is_active'] = mapped_data['isActive']
+        ret = super().to_internal_value(mapped_data)
         if 'role' in data and 'role_code' not in ret and 'role' not in ret:
             ret['role_code'] = data['role']
+        if 'schoolName' in data and 'school_name' not in ret:
+            ret['school_name'] = data['schoolName']
+        elif 'school_name' in data and 'school_name' not in ret:
+            ret['school_name'] = data['school_name']
+        if 'isArchived' in data and 'is_archived' not in ret:
+            ret['is_archived'] = data['isArchived']
+        if 'isActive' in data and 'is_active' not in ret:
+            ret['is_active'] = data['isActive']
         return ret
 
     def validate(self, attrs):
@@ -177,6 +197,13 @@ class UserProfileSerializer(serializers.ModelSerializer):
     def create(self, validated_data):
         password = validated_data.pop('password', None)
         role_code = validated_data.pop('role_code', None)
+        school_name = validated_data.pop('school_name', None)
+        if school_name is None:
+            school_name = validated_data.pop('schoolName', None)
+        if school_name is None:
+            school_name = self.initial_data.get('school_name') or self.initial_data.get('schoolName')
+
+        person_id = self.initial_data.get('person_id') or self.initial_data.get('personId')
         if role_code and 'role' not in validated_data:
             role = Role.objects.filter(code=role_code).first()
             if role:
@@ -188,20 +215,101 @@ class UserProfileSerializer(serializers.ModelSerializer):
         if password:
             user.set_password(password)
             user.save()
+
+        if person_id:
+            try:
+                target_person = Person.objects.filter(id=person_id, is_archived=False).first()
+                if target_person:
+                    # Clean up any placeholder person auto-created by post_save signal
+                    auto_created = Person.objects.filter(user=user).exclude(id=target_person.id).first()
+                    if auto_created:
+                        auto_created.delete()
+                    target_person.user = user
+                    if school_name is not None:
+                        target_person.school_name = school_name.strip() if isinstance(school_name, str) else school_name
+                    if user.role and user.role.code == 'OJT' and target_person.person_type != 'OJT':
+                        target_person.person_type = 'OJT'
+                        target_person.employment_mode = 'INTERN'
+                        target_person.rate_type = 'HOURLY'
+                    target_person.save()
+            except Exception:
+                pass
+        else:
+            try:
+                person = getattr(user, 'person', None) or Person.objects.filter(user=user).first()
+                if person:
+                    updated = False
+                    if school_name is not None:
+                        person.school_name = school_name.strip() if isinstance(school_name, str) else school_name
+                        updated = True
+                    if user.role and user.role.code == 'OJT':
+                        if person.person_type != 'OJT':
+                            person.person_type = 'OJT'
+                            person.employment_mode = 'INTERN'
+                            person.rate_type = 'HOURLY'
+                            updated = True
+                    if updated:
+                        person.save()
+            except Exception:
+                pass
+
         return user
 
     def update(self, instance, validated_data):
         password = validated_data.pop('password', None)
         role_code = validated_data.pop('role_code', None)
+        school_name = validated_data.pop('school_name', None)
+        if school_name is None:
+            school_name = validated_data.pop('schoolName', None)
+        if school_name is None and ('school_name' in self.initial_data or 'schoolName' in self.initial_data):
+            school_name = self.initial_data.get('school_name') if 'school_name' in self.initial_data else self.initial_data.get('schoolName')
+
         if role_code:
             role = Role.objects.filter(code=role_code).first()
             if role:
                 validated_data['role'] = role
+
+        is_archived_val = validated_data.get('is_archived')
+        if is_archived_val is not None:
+            if is_archived_val and not instance.is_archived:
+                request = self.context.get('request')
+                user_identifier = request.user.username if request and hasattr(request, 'user') and request.user else None
+                instance.archived_at = timezone.now()
+                instance.archived_by = user_identifier
+            elif not is_archived_val and instance.is_archived:
+                instance.archived_at = None
+                instance.archived_by = None
+
         for attr, value in validated_data.items():
             setattr(instance, attr, value)
         if password:
             instance.set_password(password)
         instance.save()
+
+        if is_archived_val is not None:
+            try:
+                person = getattr(instance, 'person', None) or Person.objects.filter(user=instance).first()
+                if person:
+                    if is_archived_val and not person.is_archived:
+                        person.archive(user_identifier=instance.archived_by)
+                    elif not is_archived_val and person.is_archived:
+                        person.restore()
+            except Exception:
+                pass
+
+        if school_name is not None:
+            try:
+                person = getattr(instance, 'person', None) or Person.objects.filter(user=instance).first()
+                if person:
+                    person.school_name = school_name.strip() if isinstance(school_name, str) else school_name
+                    if instance.role and instance.role.code == 'OJT' and person.person_type != 'OJT':
+                        person.person_type = 'OJT'
+                        person.employment_mode = 'INTERN'
+                        person.rate_type = 'HOURLY'
+                    person.save()
+            except Exception:
+                pass
+
         return instance
 
 
