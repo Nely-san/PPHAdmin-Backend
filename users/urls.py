@@ -15,6 +15,8 @@ urlpatterns = [
     path('auth/me/', current_user_view, name='auth_current_user'),
     path('auth/logout/', logout_view, name='auth_logout'),
     path('auth/change-password/', ChangePasswordView.as_view(), name='auth_change_password'),
+    path('auth/password-reset/request/', PasswordResetRequestView.as_view(), name='auth_password_reset_request'),
+    path('auth/password-reset/confirm/', PasswordResetConfirmView.as_view(), name='auth_password_reset_confirm'),
     path('auth/token/refresh/', TokenRefreshView.as_view(), name='auth_token_refresh'),
 
     # Resource routers (users, persons)
