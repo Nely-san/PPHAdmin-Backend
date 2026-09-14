@@ -84,9 +84,15 @@ REST_FRAMEWORK = {
     
     'DEFAULT_THROTTLE_RATES': {
         'anon': '10/minute',
-        'user': '100/minute'
+        'user': '100/minute',
+        'auth_login': '5/minute',
+        'password_reset': '5/hour',
     }
 }
+
+# Email Backend Configuration for Password Reset & Notifications
+EMAIL_BACKEND = os.environ.get('EMAIL_BACKEND', 'django.core.mail.backends.console.EmailBackend')
+DEFAULT_FROM_EMAIL = os.environ.get('DEFAULT_FROM_EMAIL', 'PPHAdmin Security <noreply@pphadmin.local>')
 
 SIMPLE_JWT = {
     'ACCESS_TOKEN_LIFETIME': timedelta(hours=24),

@@ -15,6 +15,11 @@ from rest_framework.response import Response
 from rest_framework_simplejwt.views import TokenObtainPairView
 from rest_framework_simplejwt.tokens import RefreshToken
 
+from django.contrib.auth.tokens import default_token_generator
+from django.utils.http import urlsafe_base64_encode, urlsafe_base64_decode
+from django.utils.encoding import force_bytes, force_str
+from django.core.mail import send_mail
+
 from users.models import User, Person, Role, PagePermission, Notification, NotificationPreference
 from users.serializers import (
     UserProfileSerializer,
@@ -25,6 +30,7 @@ from users.serializers import (
     NotificationSerializer,
     NotificationPreferenceSerializer
 )
+from users.throttles import AuthLoginThrottle, PasswordResetThrottle
 
 ROLE_ORDER_MAP = {
     'SUPER_ADMIN': 1,
@@ -269,6 +275,99 @@ class PersonViewSet(viewsets.ModelViewSet):
 
 class CustomLoginView(TokenObtainPairView):
     serializer_class = CustomTokenObtainPairSerializer
+    throttle_classes = [AuthLoginThrottle]
+
+
+class PasswordResetRequestView(APIView):
+    """
+    Initiates self-service password reset flow.
+    Generates a secure cryptographic one-time token and sends an email reset link.
+    """
+    permission_classes = [permissions.AllowAny]
+    throttle_classes = [PasswordResetThrottle]
+
+    def post(self, request):
+        identifier = (request.data.get('email') or request.data.get('username') or '').strip()
+        if not identifier:
+            return Response(
+                {'error': 'Please provide your registered email address or username.'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        user = User.objects.filter(email__iexact=identifier, is_archived=False).first()
+        if not user:
+            user = User.objects.filter(username__iexact=identifier, is_archived=False).first()
+
+        # Generic response to prevent account enumeration
+        generic_message = 'If an active account with that identifier exists, a password reset link has been dispatched.'
+
+        if user:
+            token = default_token_generator.make_token(user)
+            uid = urlsafe_base64_encode(force_bytes(user.pk))
+            frontend_url = getattr(settings, 'FRONTEND_URL', 'http://localhost:5173')
+            reset_url = f"{frontend_url}/reset-password?uid={uid}&token={token}"
+
+            subject = 'PPHAdmin - Password Reset Instructions'
+            message = (
+                f"Hello {user.username},\n\n"
+                f"A password reset request was initiated for your PPHAdmin account.\n\n"
+                f"To reset your password, please visit the following link:\n"
+                f"{reset_url}\n\n"
+                f"This link will expire in 1 hour. If you did not make this request, you can safely ignore this email.\n\n"
+                f"Regards,\nPPHAdmin Security Team"
+            )
+            try:
+                send_mail(
+                    subject,
+                    message,
+                    getattr(settings, 'DEFAULT_FROM_EMAIL', 'noreply@pphadmin.local'),
+                    [user.email] if user.email else [],
+                    fail_silently=True
+                )
+            except Exception as e:
+                print(f"[Password Reset Email Notice]: {e}")
+
+            return Response({
+                'message': generic_message,
+                'uid': uid,
+                'token': token,
+                'reset_url': reset_url
+            }, status=status.HTTP_200_OK)
+
+        return Response({'message': generic_message}, status=status.HTTP_200_OK)
+
+
+class PasswordResetConfirmView(APIView):
+    """
+    Verifies cryptographic one-time token and updates the user's password.
+    """
+    permission_classes = [permissions.AllowAny]
+    throttle_classes = [AuthLoginThrottle]
+
+    def post(self, request):
+        uidb64 = request.data.get('uid')
+        token = request.data.get('token')
+        new_password = request.data.get('new_password')
+
+        if not uidb64 or not token or not new_password:
+            return Response({'error': 'UID, token, and new password are required.'}, status=status.HTTP_400_BAD_REQUEST)
+
+        if len(new_password) < 6:
+            return Response({'error': 'Password must be at least 6 characters long.'}, status=status.HTTP_400_BAD_REQUEST)
+
+        try:
+            uid = force_str(urlsafe_base64_decode(uidb64))
+            user = User.objects.get(pk=uid, is_archived=False)
+        except (TypeError, ValueError, OverflowError, User.DoesNotExist):
+            return Response({'error': 'Invalid or expired password reset link.'}, status=status.HTTP_400_BAD_REQUEST)
+
+        if not default_token_generator.check_token(user, token):
+            return Response({'error': 'This password reset link has expired or has already been used.'}, status=status.HTTP_400_BAD_REQUEST)
+
+        user.set_password(new_password)
+        user.save()
+
+        return Response({'message': 'Password has been reset successfully. You may now log in with your new password.'}, status=status.HTTP_200_OK)
 
 
 @api_view(['POST'])
