@@ -1,7 +1,11 @@
 from django.contrib import admin
 from django.urls import path, include
+from config.health import health_check_view
 
 urlpatterns = [
+    path('healthz', health_check_view, name='healthz'),
+    path('api/health/', health_check_view, name='health_check'),
+    path('api/health', health_check_view, name='health_check_no_slash'),
     path('admin/', admin.site.urls),
     path('api/', include('users.urls')),
     path('api/', include('settings.urls')),
