@@ -32,14 +32,12 @@ class AttendanceRecordSerializer(serializers.ModelSerializer):
     person_name = serializers.CharField(source='person.name', read_only=True)
     person_type = serializers.CharField(source='person.person_type', read_only=True)
     biometric_id = serializers.CharField(source='person.biometric_id', read_only=True)
-    company_name = serializers.CharField(source='person.company_name', read_only=True)
-    department_name = serializers.CharField(source='person.department_name', read_only=True)
 
     class Meta:
         model = AttendanceRecord
         fields = [
             'id', 'person', 'person_name', 'person_type', 'biometric_id',
-            'company_name', 'department_name', 'date',
+            'date',
             'am_in', 'am_out', 'pm_in', 'pm_out', 'overtime_in', 'overtime_out',
             'actual_hours', 'required_hours', 'tardiness_minutes', 'tardiness_count',
             'early_leave_minutes', 'early_leave_count', 'overtime_regular_minutes',

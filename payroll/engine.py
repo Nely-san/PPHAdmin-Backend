@@ -205,8 +205,6 @@ def run_cutoff_payroll_batch(
     cutoff_end,
     method='OPTION_1',
     person_ids=None,
-    department_id=None,
-    company_id=None,
     include_government_deductions=True,
     include_tardiness=True,
     include_sss=True,
@@ -220,10 +218,6 @@ def run_cutoff_payroll_batch(
     persons = Person.objects.filter(is_archived=False, status='ACTIVE', base_rate__gt=Decimal('0.00'))
     if person_ids:
         persons = persons.filter(id__in=person_ids)
-    if department_id:
-        persons = persons.filter(department_id=department_id)
-    if company_id:
-        persons = persons.filter(company_id=company_id)
 
     results = []
     with transaction.atomic():

@@ -206,10 +206,6 @@ class Person(BaseModel):
     # Linked User Account
     user = models.OneToOneField(User, on_delete=models.SET_NULL, null=True, blank=True, related_name='person')
 
-    # Department & Company Info
-    company_name = models.CharField(max_length=255, null=True, blank=True)
-    department_name = models.CharField(max_length=255, null=True, blank=True)
-
     # OJT Internship Specific Tracking
     school_name = models.CharField(max_length=255, null=True, blank=True)
     coordinator_contact = models.CharField(max_length=255, null=True, blank=True)

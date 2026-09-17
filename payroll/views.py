@@ -41,14 +41,6 @@ class PayrollRecordViewSet(viewsets.ModelViewSet):
         if status_val and status_val.upper() != 'ALL':
             qs = qs.filter(status__iexact=status_val)
 
-        company_id = self.request.query_params.get('companyId')
-        if company_id:
-            qs = qs.filter(person__company_id=company_id)
-
-        department_id = self.request.query_params.get('departmentId')
-        if department_id:
-            qs = qs.filter(person__department_id=department_id)
-
         return qs
 
     @action(detail=False, methods=['post'], url_path='calculate')
@@ -65,8 +57,6 @@ class PayrollRecordViewSet(viewsets.ModelViewSet):
             cutoff_end=data['cutoff_end'],
             method=data.get('method', 'OPTION_1'),
             person_ids=data.get('person_ids'),
-            department_id=data.get('department_id'),
-            company_id=data.get('company_id'),
             include_government_deductions=data.get('include_government_deductions', True),
             include_tardiness=data.get('include_tardiness', True),
             include_sss=data.get('include_sss', True),
@@ -165,10 +155,6 @@ class SalaryRateAdjustmentViewSet(viewsets.ModelViewSet):
         persons = Person.objects.filter(is_archived=False, status='ACTIVE')
         if data.get('person_ids'):
             persons = persons.filter(id__in=data['person_ids'])
-        if data.get('department_id'):
-            persons = persons.filter(department_id=data['department_id'])
-        if data.get('company_id'):
-            persons = persons.filter(company_id=data['company_id'])
 
         adj_type = data['adjustment_type']
         adj_val = data['adjustment_value']

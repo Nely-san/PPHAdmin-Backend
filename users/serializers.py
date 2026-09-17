@@ -20,7 +20,7 @@ class PersonDetailSerializer(serializers.ModelSerializer):
             'id', 'user_id', 'username', 'approval_status', 'is_active',
             'biometric_id', 'name', 'person_type', 'employment_mode', 
             'rate_type', 'base_rate', 'date_started', 'date_ended', 'status', 
-            'company_name', 'department_name', 'school_name', 'coordinator_contact', 
+            'school_name', 'coordinator_contact', 
             'required_ojt_hours', 'rendered_ojt_hours', 'is_newly_imported',
             'work_setup', 'notes', 'shift_code', 'work_days', 'has_government_deductions'
         ]
@@ -36,8 +36,6 @@ class PersonDetailSerializer(serializers.ModelSerializer):
             'hasGovernmentDeductions': 'has_government_deductions',
             'dateStarted': 'date_started',
             'dateEnded': 'date_ended',
-            'companyName': 'company_name',
-            'departmentName': 'department_name',
             'schoolName': 'school_name',
             'coordinatorContact': 'coordinator_contact',
             'requiredOjtHours': 'required_ojt_hours',
@@ -58,26 +56,6 @@ class PersonDetailSerializer(serializers.ModelSerializer):
             else:
                 mapped_data['biometric_id'] = str(bio).strip()
 
-        company_id = mapped_data.get('company_id') or mapped_data.get('companyId')
-        if company_id and not mapped_data.get('company_name'):
-            try:
-                from organization.models import Company
-                comp = Company.objects.filter(id=company_id).first()
-                if comp:
-                    mapped_data['company_name'] = comp.name
-            except Exception:
-                pass
-
-        dept_id = mapped_data.get('department_id') or mapped_data.get('departmentId')
-        if dept_id and not mapped_data.get('department_name'):
-            try:
-                from organization.models import Department
-                dept = Department.objects.filter(id=dept_id).first()
-                if dept:
-                    mapped_data['department_name'] = dept.name
-            except Exception:
-                pass
-
         return super().to_internal_value(mapped_data)
 
     def create(self, validated_data):
@@ -95,17 +73,28 @@ class PersonDetailSerializer(serializers.ModelSerializer):
         return super().create(validated_data)
 
     def update(self, instance, validated_data):
-        if not instance.user:
-            user_id = self.initial_data.get('user_id') or self.initial_data.get('userId')
-            username = self.initial_data.get('username')
+        username = self.initial_data.get('username')
+        user_id = self.initial_data.get('user_id') or self.initial_data.get('userId')
+        if instance.user:
+            if username is not None:
+                cleaned_username = username.strip() if isinstance(username, str) else ''
+                if cleaned_username and instance.user.username != cleaned_username:
+                    existing_user = User.objects.filter(username__iexact=cleaned_username).exclude(id=instance.user.id).first()
+                    if existing_user:
+                        raise serializers.ValidationError({'username': f"Username '{cleaned_username}' is already taken."})
+                    instance.user.username = cleaned_username
+                    instance.user.save(update_fields=['username'])
+        else:
             if user_id:
                 user = User.objects.filter(id=user_id).first()
                 if user and (not getattr(user, 'person', None) or user.person == instance):
                     instance.user = user
             elif username:
-                user = User.objects.filter(username__iexact=username).first()
-                if user and (not getattr(user, 'person', None) or user.person == instance):
-                    instance.user = user
+                cleaned_username = username.strip() if isinstance(username, str) else ''
+                if cleaned_username:
+                    user = User.objects.filter(username__iexact=cleaned_username).first()
+                    if user and (not getattr(user, 'person', None) or user.person == instance):
+                        instance.user = user
         return super().update(instance, validated_data)
 
 

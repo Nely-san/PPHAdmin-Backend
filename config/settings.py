@@ -50,7 +50,6 @@ INSTALLED_APPS = [
     'corsheaders',
     'rest_framework',
     'settings',
-    'organization',
     'users',
     'audit',
     'scheduling',

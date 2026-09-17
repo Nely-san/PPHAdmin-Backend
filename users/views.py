@@ -212,13 +212,73 @@ class UserViewSet(viewsets.ModelViewSet):
         )
 
 
+class HasEmployeePermission(permissions.BasePermission):
+    """
+    RBAC permission check for Employee / Person profile management endpoints.
+    Allows Super Admins full access.
+    For other users, verifies that their role or custom permissions include
+    'employees' or 'personnel' and that specific actions (view/add/edit/delete) are permitted.
+    """
+    def has_permission(self, request, view):
+        if not request.user or not request.user.is_authenticated:
+            return False
+
+        # Super Admin has unrestricted access
+        user_role_code = request.user.role.code if request.user.role else ''
+        if (
+            user_role_code == 'SUPER_ADMIN'
+            or getattr(request.user, 'is_superuser', False)
+        ):
+            return True
+
+        # Collect user's allowed permission codes
+        role_codes = set()
+        if request.user.role:
+            role_codes = set(request.user.role.permissions.values_list('code', flat=True))
+        custom_codes = set(request.user.custom_permissions.values_list('code', flat=True))
+        all_codes = role_codes | custom_codes
+
+        # Check if user has access to employees or personnel module
+        has_employee_module = any(
+            code in all_codes or any(c.startswith(f"{code}:") for c in all_codes)
+            for code in ['employees', 'personnel']
+        )
+        if not has_employee_module:
+            return False
+
+        # Action-level permission check
+        if request.method in permissions.SAFE_METHODS:
+            return True
+
+        if request.method == 'POST':
+            if getattr(view, 'action', '') in ['archive_person', 'unarchive_person']:
+                if 'employees:delete' in all_codes or 'personnel:delete' in all_codes:
+                    return True
+                return 'employees' in all_codes or 'personnel' in all_codes
+            if 'employees:add' in all_codes or 'personnel:add' in all_codes:
+                return True
+            return 'employees' in all_codes or 'personnel' in all_codes
+
+        if request.method in ['PUT', 'PATCH']:
+            if 'employees:edit' in all_codes or 'personnel:edit' in all_codes:
+                return True
+            return 'employees' in all_codes or 'personnel' in all_codes
+
+        if request.method == 'DELETE':
+            if 'employees:delete' in all_codes or 'personnel:delete' in all_codes:
+                return True
+            return 'employees' in all_codes or 'personnel' in all_codes
+
+        return True
+
+
 class PersonViewSet(viewsets.ModelViewSet):
     """
     Personnel (Employee & OJT) profiles management.
     """
     queryset = Person.objects.filter(is_archived=False)
     serializer_class = PersonDetailSerializer
-    permission_classes = [permissions.IsAuthenticated]
+    permission_classes = [permissions.IsAuthenticated, HasEmployeePermission]
     pagination_class = None
 
     def get_queryset(self):

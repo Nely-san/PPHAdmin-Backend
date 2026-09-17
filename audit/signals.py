@@ -16,7 +16,7 @@ EXCLUDED_MODELS = {
     'Notification', 'OutstandingToken', 'BlacklistedToken'
 }
 
-AUDITED_APPS = {'users', 'settings', 'organization', 'payroll', 'leaves_ob'}
+AUDITED_APPS = {'users', 'settings', 'payroll', 'leaves_ob'}
 
 class AuditJSONEncoder(DjangoJSONEncoder):
     def default(self, o):

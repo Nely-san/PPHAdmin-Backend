@@ -13,15 +13,12 @@ class PayrollRecordSerializer(serializers.ModelSerializer):
     person_type = serializers.CharField(source='person.person_type', read_only=True)
     rate_type = serializers.CharField(source='person.rate_type', read_only=True)
     base_rate = serializers.DecimalField(source='person.base_rate', max_digits=10, decimal_places=2, read_only=True)
-    company_name = serializers.CharField(source='person.company_name', read_only=True)
-    department_name = serializers.CharField(source='person.department_name', read_only=True)
     items = PayrollItemSerializer(many=True, read_only=True)
 
     class Meta:
         model = PayrollRecord
         fields = [
             'id', 'person', 'person_name', 'person_type', 'rate_type', 'base_rate',
-            'company_name', 'department_name',
             'cutoff_start', 'cutoff_end', 'gross_pay', 'total_deductions',
             'net_pay', 'status', 'items',
             'is_archived', 'archived_at', 'archived_by', 'created_at', 'updated_at'
@@ -50,8 +47,6 @@ class PayrollCalculateSerializer(serializers.Serializer):
     cutoff_end = serializers.DateField(required=True)
     method = serializers.ChoiceField(choices=['OPTION_1', 'OPTION_2'], default='OPTION_1')
     person_ids = serializers.ListField(child=serializers.UUIDField(), required=False, default=list)
-    department_id = serializers.UUIDField(required=False, allow_null=True)
-    company_id = serializers.UUIDField(required=False, allow_null=True)
     include_government_deductions = serializers.BooleanField(required=False, default=True)
     include_tardiness = serializers.BooleanField(required=False, default=True)
     include_sss = serializers.BooleanField(required=False, default=True)
@@ -74,8 +69,6 @@ class BaseRateAdjustSerializer(serializers.Serializer):
 
 
 class BulkSalaryAdjustSerializer(serializers.Serializer):
-    department_id = serializers.UUIDField(required=False, allow_null=True)
-    company_id = serializers.UUIDField(required=False, allow_null=True)
     person_ids = serializers.ListField(child=serializers.UUIDField(), required=False, default=list)
     adjustment_type = serializers.ChoiceField(choices=['PERCENTAGE', 'FLAT_AMOUNT', 'TARGET_RATE'])
     adjustment_value = serializers.DecimalField(max_digits=10, decimal_places=2, required=True)

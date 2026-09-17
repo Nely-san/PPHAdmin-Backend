@@ -91,14 +91,6 @@ class AttendanceRecordViewSet(viewsets.ModelViewSet):
         if person_type and person_type.upper() != 'ALL':
             qs = qs.filter(person__person_type__iexact=person_type)
 
-        company_id = self.request.query_params.get('companyId')
-        if company_id:
-            qs = qs.filter(person__company_id=company_id)
-
-        department_id = self.request.query_params.get('departmentId')
-        if department_id:
-            qs = qs.filter(person__department_id=department_id)
-
         search = self.request.query_params.get('search')
         if search and search.strip():
             q = search.strip()
