@@ -14,4 +14,5 @@ urlpatterns = [
     path('api/', include('biometrics_attendance.urls')),
     path('api/', include('leaves_ob.urls')),
     path('api/', include('payroll.urls')),
+    path('api/', include('organization.urls')),
 ]

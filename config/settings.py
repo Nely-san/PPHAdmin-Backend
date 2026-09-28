@@ -56,6 +56,7 @@ INSTALLED_APPS = [
     'biometrics_attendance',
     'leaves_ob',
     'payroll',
+    'organization',
 ]
 
 MIDDLEWARE = [

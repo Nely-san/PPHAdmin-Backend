@@ -1,3 +1,4 @@
+from django.core.cache import cache
 from django.test import TestCase
 from rest_framework.test import APIClient
 from rest_framework import status
@@ -6,20 +7,21 @@ from users.models import User, Role, PagePermission, Person
 
 class AccountApprovalTests(TestCase):
     def setUp(self):
+        cache.clear()
         self.client = APIClient()
 
         # Seed Page Permissions
-        self.perm_dash = PagePermission.objects.create(code='dashboard', name='Dashboard', module='SYSTEM')
-        self.perm_emp = PagePermission.objects.create(code='employees', name='Employees', module='HR')
-        self.perm_payroll = PagePermission.objects.create(code='payroll', name='Payroll', module='PAYROLL')
-        self.perm_users = PagePermission.objects.create(code='user-management', name='User Management', module='SYSTEM')
+        self.perm_dash, _ = PagePermission.objects.get_or_create(code='dashboard', defaults={'name': 'Dashboard', 'module': 'SYSTEM'})
+        self.perm_emp, _ = PagePermission.objects.get_or_create(code='employees', defaults={'name': 'Employees', 'module': 'HR'})
+        self.perm_payroll, _ = PagePermission.objects.get_or_create(code='payroll', defaults={'name': 'Payroll', 'module': 'PAYROLL'})
+        self.perm_users, _ = PagePermission.objects.get_or_create(code='user-management', defaults={'name': 'User Management', 'module': 'SYSTEM'})
 
         # Seed Roles
-        self.sa_role = Role.objects.create(name='Super Admin', code='SUPER_ADMIN', is_system_role=True)
-        self.hr_role = Role.objects.create(name='HR Manager', code='HR_MANAGER')
+        self.sa_role, _ = Role.objects.get_or_create(code='SUPER_ADMIN', defaults={'name': 'Super Admin', 'is_system_role': True})
+        self.hr_role, _ = Role.objects.get_or_create(code='HR_MANAGER', defaults={'name': 'HR Manager'})
         self.hr_role.permissions.add(self.perm_dash, self.perm_emp)
 
-        self.emp_role = Role.objects.create(name='Employee', code='EMPLOYEE')
+        self.emp_role, _ = Role.objects.get_or_create(code='EMPLOYEE', defaults={'name': 'Employee'})
         self.emp_role.permissions.add(self.perm_dash)
 
         # Create Super Admin User
