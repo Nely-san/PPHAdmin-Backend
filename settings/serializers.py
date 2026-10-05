@@ -79,16 +79,21 @@ class RoleSerializer(serializers.ModelSerializer):
             perm = PagePermission.objects.filter(code=pcode).first()
             if not perm:
                 parts = pcode.split(':')
-                base_code = parts[0]
-                action_name = parts[1] if len(parts) > 1 else 'view'
+                action_tokens = [p for p in parts if p in ('view', 'add', 'edit', 'delete')]
+                non_action_tokens = [p for p in parts if p not in ('view', 'add', 'edit', 'delete')]
+                base_code = ':'.join(non_action_tokens) if non_action_tokens else parts[0]
+                action_desc = ', '.join(a.capitalize() for a in action_tokens) if action_tokens else 'Full'
+
                 base_perm = PagePermission.objects.filter(code=base_code).first()
+                clean_name = base_perm.name if base_perm else base_code.replace(':', ' - ').replace('-', ' ').title()
+
                 perm, _ = PagePermission.objects.get_or_create(
                     code=pcode,
                     defaults={
-                        'name': f"{base_perm.name if base_perm else base_code.title()} ({action_name.capitalize()})",
+                        'name': f"{clean_name} ({action_desc})",
                         'module': base_perm.module if base_perm else 'SYSTEM',
                         'icon': base_perm.icon if base_perm else 'fi fi-rr-check',
-                        'description': f"Permission to {action_name} in {base_perm.name if base_perm else base_code}"
+                        'description': f"Permission capabilities ({action_desc}) for {clean_name}"
                     }
                 )
             if perm:
@@ -151,6 +156,10 @@ class RoleSerializer(serializers.ModelSerializer):
         instance.save()
 
         if permission_codes is not None:
+            if instance.code == 'SUPER_ADMIN':
+                for required_code in ['dashboard', 'user-management', 'roles-permissions']:
+                    if required_code not in permission_codes and f"{required_code}:view" not in permission_codes:
+                        permission_codes.append(required_code)
             perms = self._resolve_permissions(permission_codes)
             instance.permissions.set(perms)
         return instance
