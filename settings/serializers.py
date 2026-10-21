@@ -75,7 +75,13 @@ class RoleSerializer(serializers.ModelSerializer):
 
     def _resolve_permissions(self, permission_codes):
         perms = []
+        obsolete_codes = {'hr-reports', 'payroll-reports', 'system-reports', 'payroll-register'}
         for pcode in permission_codes:
+            if not pcode or pcode in obsolete_codes:
+                continue
+            parts = pcode.split(':')
+            if parts[0] in obsolete_codes:
+                continue
             perm = PagePermission.objects.filter(code=pcode).first()
             if not perm:
                 parts = pcode.split(':')
