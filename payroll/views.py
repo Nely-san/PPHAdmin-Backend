@@ -43,6 +43,31 @@ class PayrollRecordViewSet(viewsets.ModelViewSet):
 
         return qs
 
+    @action(detail=False, methods=['get'], url_path='my-payslips')
+    def my_payslips(self, request):
+        person = getattr(request.user, 'person', None)
+        if not person:
+            return Response([])
+        records = PayrollRecord.objects.filter(
+            person=person,
+            is_archived=False
+        ).exclude(status='LOCKED').prefetch_related('items').order_by('-cutoff_start')
+        serializer = PayrollRecordSerializer(records, many=True)
+        return Response(serializer.data)
+
+    @action(detail=False, methods=['get'], url_path='my-payslips/history')
+    def my_payslips_history(self, request):
+        person = getattr(request.user, 'person', None)
+        if not person:
+            return Response([])
+        records = PayrollRecord.objects.filter(
+            person=person,
+            status__in=['LOCKED', 'PAID'],
+            is_archived=False
+        ).prefetch_related('items').order_by('-cutoff_start')
+        serializer = PayrollRecordSerializer(records, many=True)
+        return Response(serializer.data)
+
     @action(detail=False, methods=['post'], url_path='calculate')
     def calculate_cutoff(self, request):
         """

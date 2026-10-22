@@ -22,6 +22,17 @@ class LeaveOBApplicationSerializer(serializers.ModelSerializer):
             'is_archived', 'archived_at', 'archived_by'
         ]
 
+    def to_representation(self, instance):
+        ret = super().to_representation(instance)
+        ret['employeeId'] = ret.get('person')
+        ret['employeeName'] = ret.get('person_name')
+        ret['startDate'] = ret.get('start_date')
+        ret['endDate'] = ret.get('end_date')
+        ret['totalDays'] = float(ret.get('total_days') or 0)
+        ret['daysCount'] = float(ret.get('total_days') or 0)
+        ret['requestType'] = ret.get('request_type')
+        return ret
+
 
 class LeaveOBActionSerializer(serializers.Serializer):
     action = serializers.ChoiceField(choices=['APPROVED', 'REJECTED'])

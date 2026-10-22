@@ -105,6 +105,120 @@ class AccountApprovalTests(TestCase):
         self.assertEqual(user.rejection_reason, 'Invalid company affiliation.')
         self.assertEqual(user.approved_by, self.super_admin)
 
+    def test_unauthorized_user_cannot_approve_or_reject_account(self):
+        # Create unprivileged employee
+        emp_user = User.objects.create_user(username='regular_emp', password='password123', role=self.emp_role)
+        # Create pending candidate
+        candidate = User.objects.create_user(username='candidate_user', password='password123', role=self.emp_role)
+
+        # Authenticate as employee (no user-management:edit permission)
+        self.client.force_authenticate(user=emp_user)
+        approve_res = self.client.post(f'/api/users/{candidate.id}/approve/', {
+            'role_id': self.emp_role.id
+        })
+        self.assertEqual(approve_res.status_code, status.HTTP_403_FORBIDDEN)
+
+        reject_res = self.client.post(f'/api/users/{candidate.id}/reject/', {
+            'rejection_reason': 'Unauthorized rejection attempt'
+        })
+        self.assertEqual(reject_res.status_code, status.HTTP_403_FORBIDDEN)
+
+        # Unauthenticated request
+        self.client.force_authenticate(user=None)
+        unauth_res = self.client.post(f'/api/users/{candidate.id}/approve/', {
+            'role_id': self.emp_role.id
+        })
+        self.assertEqual(unauth_res.status_code, status.HTTP_401_UNAUTHORIZED)
+
+    def test_pending_approvals_view_permission_gating(self):
+        """
+        Gating test for GET /api/users/pending-approvals/:
+        - Unauthenticated -> 401
+        - Authenticated without 'user-management:view' -> 403
+        - Authenticated with 'user-management:view' -> 200
+        """
+        # Register a pending user
+        self.client.post('/api/auth/register/', {
+            'username': 'pending_candidate_view',
+            'email': 'cand_view@example.com',
+            'password': 'Password123!'
+        })
+
+        # 1. Unauthenticated request -> 401
+        self.client.force_authenticate(user=None)
+        res_unauth = self.client.get('/api/users/pending-approvals/')
+        self.assertEqual(res_unauth.status_code, status.HTTP_401_UNAUTHORIZED)
+
+        # 2. Authenticated user without user-management view -> 403
+        unprivileged_user = User.objects.create_user(
+            username='viewer_denied',
+            password='password123',
+            role=self.emp_role
+        )
+        self.client.force_authenticate(user=unprivileged_user)
+        res_denied = self.client.get('/api/users/pending-approvals/')
+        self.assertEqual(res_denied.status_code, status.HTTP_403_FORBIDDEN)
+
+        # 3. Authenticated user with 'user-management:view' custom permission -> 200
+        perm_view, _ = PagePermission.objects.get_or_create(
+            code='user-management:view',
+            defaults={'name': 'User Management View', 'module': 'SYSTEM'}
+        )
+        unprivileged_user.custom_permissions.add(perm_view)
+        res_allowed = self.client.get('/api/users/pending-approvals/')
+        self.assertEqual(res_allowed.status_code, status.HTTP_200_OK)
+
+    def test_user_lifecycle_actions_permission_gating(self):
+        """
+        Gating test for archive_user, unarchive_user, and destroy:
+        - archive_user requires 'user-management:delete' (or ADMIN/SUPER_ADMIN)
+        - unarchive_user requires 'user-management:edit' (or ADMIN/SUPER_ADMIN)
+        - destroy requires 'user-management:delete' (or ADMIN/SUPER_ADMIN)
+        """
+        emp_user = User.objects.create_user(username='regular_staff', password='password123', role=self.emp_role)
+        target = User.objects.create_user(username='target_subject', password='password123', role=self.emp_role)
+
+        perm_delete, _ = PagePermission.objects.get_or_create(
+            code='user-management:delete',
+            defaults={'name': 'User Management Delete', 'module': 'SYSTEM'}
+        )
+        perm_edit, _ = PagePermission.objects.get_or_create(
+            code='user-management:edit',
+            defaults={'name': 'User Management Edit', 'module': 'SYSTEM'}
+        )
+
+        # --- Test archive_user ---
+        self.client.force_authenticate(user=emp_user)
+        res_arch_denied = self.client.post(f'/api/users/{target.id}/archive/')
+        self.assertEqual(res_arch_denied.status_code, status.HTTP_403_FORBIDDEN)
+
+        emp_user.custom_permissions.add(perm_delete)
+        res_arch_allowed = self.client.post(f'/api/users/{target.id}/archive/')
+        self.assertEqual(res_arch_allowed.status_code, status.HTTP_200_OK)
+        target.refresh_from_db()
+        self.assertTrue(target.is_archived)
+
+        # --- Test unarchive_user ---
+        emp_user.custom_permissions.remove(perm_delete)
+        self.client.force_authenticate(user=emp_user)
+        res_unarch_denied = self.client.post(f'/api/users/{target.id}/unarchive/')
+        self.assertEqual(res_unarch_denied.status_code, status.HTTP_403_FORBIDDEN)
+
+        emp_user.custom_permissions.add(perm_edit)
+        res_unarch_allowed = self.client.post(f'/api/users/{target.id}/unarchive/')
+        self.assertEqual(res_unarch_allowed.status_code, status.HTTP_200_OK)
+        target.refresh_from_db()
+        self.assertFalse(target.is_archived)
+
+        # --- Test destroy ---
+        emp_user.custom_permissions.remove(perm_edit)
+        res_del_denied = self.client.delete(f'/api/users/{target.id}/')
+        self.assertEqual(res_del_denied.status_code, status.HTTP_403_FORBIDDEN)
+
+        emp_user.custom_permissions.add(perm_delete)
+        res_del_allowed = self.client.delete(f'/api/users/{target.id}/')
+        self.assertEqual(res_del_allowed.status_code, status.HTTP_204_NO_CONTENT)
+
     def test_cannot_reject_super_admin(self):
         self.client.force_authenticate(user=self.super_admin)
         reject_response = self.client.post(f'/api/users/{self.super_admin.id}/reject/', {

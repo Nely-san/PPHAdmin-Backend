@@ -102,6 +102,18 @@ class AttendanceRecordViewSet(viewsets.ModelViewSet):
 
         return qs
 
+    @action(detail=False, methods=['get'], url_path='my-attendance')
+    def my_attendance(self, request):
+        person = getattr(request.user, 'person', None)
+        if not person:
+            return Response([])
+        qs = AttendanceRecord.objects.filter(
+            person=person,
+            is_archived=False
+        ).select_related('person', 'batch').order_by('-date')
+        serializer = self.get_serializer(qs, many=True)
+        return Response(serializer.data)
+
     @action(detail=False, methods=['post'], url_path='field-log')
     def field_log(self, request):
         """
@@ -142,13 +154,78 @@ class AttendanceRecordViewSet(viewsets.ModelViewSet):
         return Response(AttendanceRecordSerializer(record).data, status=status.HTTP_201_CREATED)
 
 
+from users.views import user_has_module_permission
+
+class HasAttendanceExceptionPermission(permissions.BasePermission):
+    """
+    RBAC permission for AbnormalClockingViewSet.
+    - list / retrieve: requires 'attendance:exceptions:view' (or parent module) or SUPER_ADMIN/HR management role.
+    - justify: requires 'attendance:exceptions:edit' (or parent module) or SUPER_ADMIN/HR management role,
+      OR the target record must belong to caller's own Person record (self-justify).
+    - create / update / destroy: requires 'attendance:exceptions:edit' or management role.
+    """
+    def has_permission(self, request, view):
+        if not request.user or not request.user.is_authenticated:
+            return False
+        action = getattr(view, 'action', '')
+        if action == 'justify':
+            # Detail action: permit authenticated caller to reach has_object_permission
+            return True
+        if action in ['list', 'retrieve'] or request.method in permissions.SAFE_METHODS:
+            return user_has_module_permission(
+                request.user,
+                'attendance:exceptions',
+                action='view',
+                allowed_role_codes=['ADMIN', 'HR_ADMIN', 'HR_MANAGER']
+            )
+        return user_has_module_permission(
+            request.user,
+            'attendance:exceptions',
+            action='edit',
+            allowed_role_codes=['ADMIN', 'HR_ADMIN', 'HR_MANAGER']
+        )
+
+    def has_object_permission(self, request, view, obj):
+        action = getattr(view, 'action', '')
+        if action == 'justify':
+            # Manager / Supervisor with edit permission can justify anyone
+            if user_has_module_permission(
+                request.user,
+                'attendance:exceptions',
+                action='edit',
+                allowed_role_codes=['ADMIN', 'HR_ADMIN', 'HR_MANAGER']
+            ):
+                return True
+            # Otherwise, check if target record belongs to caller's own Person record
+            user_person = getattr(request.user, 'person', None)
+            if user_person and obj.person_id == user_person.id:
+                return True
+            if obj.person and getattr(obj.person, 'user_id', None) == request.user.id:
+                return True
+            return False
+
+        if action in ['retrieve'] or request.method in permissions.SAFE_METHODS:
+            return user_has_module_permission(
+                request.user,
+                'attendance:exceptions',
+                action='view',
+                allowed_role_codes=['ADMIN', 'HR_ADMIN', 'HR_MANAGER']
+            )
+        return user_has_module_permission(
+            request.user,
+            'attendance:exceptions',
+            action='edit',
+            allowed_role_codes=['ADMIN', 'HR_ADMIN', 'HR_MANAGER']
+        )
+
+
 class AbnormalClockingViewSet(viewsets.ModelViewSet):
     """
     ViewSet for Anomaly Exceptions and Justifications (/api/attendance/exceptions/).
     """
     queryset = AbnormalClocking.objects.filter(is_archived=False).select_related('person', 'attendance_record', 'justified_by')
     serializer_class = AbnormalClockingSerializer
-    permission_classes = [permissions.IsAuthenticated]
+    permission_classes = [permissions.IsAuthenticated, HasAttendanceExceptionPermission]
     pagination_class = None
 
     def get_queryset(self):

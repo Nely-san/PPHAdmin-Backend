@@ -7,6 +7,22 @@ from django.db.models import Q
 from leaves_ob.models import LeaveOBApplication
 from leaves_ob.serializers import LeaveOBApplicationSerializer, LeaveOBActionSerializer
 
+from users.views import user_has_module_permission
+
+class HasLeaveApprovalPermission(permissions.BasePermission):
+    """
+    RBAC permission for Leave & OB applications approval/rejection.
+    Requires 'attendance:leaves:edit' (or parent module) or SUPER_ADMIN/HR management role.
+    """
+    def has_permission(self, request, view):
+        return user_has_module_permission(
+            request.user,
+            'attendance:leaves',
+            action='edit',
+            allowed_role_codes=['ADMIN', 'HR_ADMIN', 'HR_MANAGER']
+        )
+
+
 class LeaveOBViewSet(viewsets.ModelViewSet):
     """
     CRUD ViewSet for Leave & Official Business (OB) Applications (/api/leaves-ob/).
@@ -57,7 +73,19 @@ class LeaveOBViewSet(viewsets.ModelViewSet):
         else:
             serializer.save()
 
-    @action(detail=True, methods=['post'], url_path='action')
+    @action(detail=False, methods=['get'], url_path='my-leaves')
+    def my_leaves(self, request):
+        person = getattr(request.user, 'person', None)
+        if not person:
+            return Response([])
+        records = LeaveOBApplication.objects.filter(
+            person=person,
+            is_archived=False
+        ).select_related('person', 'reviewed_by').order_by('-start_date')
+        serializer = self.get_serializer(records, many=True)
+        return Response(serializer.data)
+
+    @action(detail=True, methods=['post'], url_path='action', permission_classes=[permissions.IsAuthenticated, HasLeaveApprovalPermission])
     def process_action(self, request, pk=None):
         """
         HR Review / Approval / Rejection endpoint.

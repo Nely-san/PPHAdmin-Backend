@@ -13,5 +13,7 @@ router.register(r'attendance/summaries', AttendanceSummaryViewSet, basename='att
 router.register(r'attendance', AttendanceRecordViewSet, basename='attendance')
 
 urlpatterns = [
+    path('attendance/my-attendance/', AttendanceRecordViewSet.as_view({'get': 'my_attendance'}), name='attendance-my-attendance'),
+    path('attendance/my-attendance', AttendanceRecordViewSet.as_view({'get': 'my_attendance'}), name='attendance-my-attendance-no-slash'),
     path('', include(router.urls)),
 ]

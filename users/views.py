@@ -42,6 +42,89 @@ ROLE_ORDER_MAP = {
 }
 
 
+def user_has_module_permission(user, module_code, action='edit', allowed_role_codes=None):
+    """
+    Evaluates whether an authenticated user has permission to access or perform
+    an action on a given system module.
+    - Super Admins have unrestricted access.
+    - Specific allowed role codes (e.g. 'ADMIN', 'HR_ADMIN') are granted access.
+    - Dynamic module codes from role.permissions and custom_permissions are evaluated.
+    """
+    if not user or not user.is_authenticated:
+        return False
+
+    user_role_code = user.role.code if user.role else ''
+    if user_role_code == 'SUPER_ADMIN' or getattr(user, 'is_superuser', False):
+        return True
+
+    if allowed_role_codes and user_role_code in allowed_role_codes:
+        return True
+
+    role_codes = set()
+    if user.role:
+        role_codes = set(user.role.permissions.values_list('code', flat=True))
+    custom_codes = set(user.custom_permissions.values_list('code', flat=True))
+    all_codes = role_codes | custom_codes
+
+    # Direct match: full module or specific action
+    if module_code in all_codes or f"{module_code}:{action}" in all_codes:
+        return True
+
+    # If action is 'view', check if any sub-action of this module is granted
+    if action == 'view' and any(c.startswith(f"{module_code}:") for c in all_codes):
+        return True
+
+    # If module_code has sub-modules (e.g. 'attendance:leaves'), check parent module
+    if ':' in module_code:
+        parent = module_code.split(':')[0]
+        if parent in all_codes or f"{parent}:{action}" in all_codes:
+            return True
+
+    return False
+
+
+class HasUserManagementViewPermission(permissions.BasePermission):
+    """
+    Enforces authorization for User viewing endpoints (e.g. pending-approvals).
+    Requires 'user-management:view' (or 'user-management') permission or SUPER_ADMIN / ADMIN role.
+    """
+    def has_permission(self, request, view):
+        return user_has_module_permission(
+            request.user,
+            'user-management',
+            action='view',
+            allowed_role_codes=['ADMIN']
+        )
+
+
+class HasUserManagementEditPermission(permissions.BasePermission):
+    """
+    Enforces authorization for User approval and rejection endpoints.
+    Requires 'user-management:edit' (or 'user-management') permission or SUPER_ADMIN / ADMIN role.
+    """
+    def has_permission(self, request, view):
+        return user_has_module_permission(
+            request.user,
+            'user-management',
+            action='edit',
+            allowed_role_codes=['ADMIN']
+        )
+
+
+class HasUserManagementDeletePermission(permissions.BasePermission):
+    """
+    Enforces authorization for User archiving and deletion endpoints.
+    Requires 'user-management:delete' (or 'user-management') permission or SUPER_ADMIN / ADMIN role.
+    """
+    def has_permission(self, request, view):
+        return user_has_module_permission(
+            request.user,
+            'user-management',
+            action='delete',
+            allowed_role_codes=['ADMIN']
+        )
+
+
 class UserViewSet(viewsets.ModelViewSet):
     """
     User account management with Single Super Admin, Undeletable Super Admin protections,
@@ -86,6 +169,11 @@ class UserViewSet(viewsets.ModelViewSet):
 
         return qs
 
+    def get_permissions(self):
+        if self.action == 'destroy':
+            return [permissions.IsAuthenticated(), HasUserManagementDeletePermission()]
+        return super().get_permissions()
+
     def destroy(self, request, *args, **kwargs):
         user = self.get_object()
         if user.role and user.role.code == 'SUPER_ADMIN':
@@ -96,7 +184,7 @@ class UserViewSet(viewsets.ModelViewSet):
         user.archive(user_identifier=request.user.username)
         return Response(status=status.HTTP_204_NO_CONTENT)
 
-    @action(detail=True, methods=['post'], url_path='archive')
+    @action(detail=True, methods=['post'], url_path='archive', permission_classes=[permissions.IsAuthenticated, HasUserManagementDeletePermission])
     def archive_user(self, request, pk=None):
         user = self.get_object()
         if user.role and user.role.code == 'SUPER_ADMIN':
@@ -107,13 +195,13 @@ class UserViewSet(viewsets.ModelViewSet):
         user.archive(user_identifier=request.user.username)
         return Response(self.get_serializer(user).data)
 
-    @action(detail=True, methods=['post'], url_path='unarchive')
+    @action(detail=True, methods=['post'], url_path='unarchive', permission_classes=[permissions.IsAuthenticated, HasUserManagementEditPermission])
     def unarchive_user(self, request, pk=None):
         user = self.get_object()
         user.restore()
         return Response(self.get_serializer(user).data)
 
-    @action(detail=False, methods=['get'], url_path='pending-approvals')
+    @action(detail=False, methods=['get'], url_path='pending-approvals', permission_classes=[permissions.IsAuthenticated, HasUserManagementViewPermission])
     def pending_approvals(self, request):
         """
         List all accounts awaiting admin review & approval.
@@ -122,7 +210,7 @@ class UserViewSet(viewsets.ModelViewSet):
         serializer = self.get_serializer(pending_users, many=True)
         return Response(serializer.data)
 
-    @action(detail=True, methods=['post'], url_path='approve')
+    @action(detail=True, methods=['post'], url_path='approve', permission_classes=[permissions.IsAuthenticated, HasUserManagementEditPermission])
     def approve_user(self, request, pk=None):
         """
         Approve an account, assign dynamic role and accessible pages, and activate login.
@@ -176,7 +264,7 @@ class UserViewSet(viewsets.ModelViewSet):
             status=status.HTTP_200_OK
         )
 
-    @action(detail=True, methods=['post'], url_path='reject')
+    @action(detail=True, methods=['post'], url_path='reject', permission_classes=[permissions.IsAuthenticated, HasUserManagementEditPermission])
     def reject_user(self, request, pk=None):
         """
         Reject an account application with a mandatory rejection reason.

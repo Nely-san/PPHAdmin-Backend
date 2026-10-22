@@ -155,3 +155,42 @@ class BiometricsAttendanceTests(APITestCase):
         self.assertTrue(res['is_abnormal'])
         self.assertIn('missing pm clock-out', res['anomaly_reason'].lower())
 
+    def test_attendance_exceptions_authorization_and_self_justify(self):
+        emp_role, _ = Role.objects.get_or_create(code='EMPLOYEE', defaults={'name': 'Employee'})
+        emp_user = User.objects.create_user(username='emp_viewer', password='password123', role=emp_role)
+        # User post_save signal automatically created emp_user.person
+        own_person = emp_user.person
+
+        # Exception on someone else's record (self.person)
+        other_exc = AbnormalClocking.objects.create(
+            person=self.person, date=date(2026, 3, 2), tardiness_minutes=20, status='PENDING'
+        )
+        # Exception on employee's own record (own_person)
+        own_exc = AbnormalClocking.objects.create(
+            person=own_person, date=date(2026, 3, 2), tardiness_minutes=15, status='PENDING'
+        )
+
+        # 1. Unauthenticated request -> 401
+        self.client.force_authenticate(user=None)
+        res_unauth = self.client.get('/api/attendance/exceptions/')
+        self.assertEqual(res_unauth.status_code, status.HTTP_401_UNAUTHORIZED)
+
+        # 2. Regular employee without view permission listing all exceptions -> 403
+        self.client.force_authenticate(user=emp_user)
+        res_list = self.client.get('/api/attendance/exceptions/')
+        self.assertEqual(res_list.status_code, status.HTTP_403_FORBIDDEN)
+
+        # 3. Regular employee justifying someone else's record -> 403
+        res_justify_other = self.client.post(f'/api/attendance/exceptions/{other_exc.id}/justify/', {
+            'status': 'EXCUSED',
+            'reason': 'Trying to justify someone else'
+        })
+        self.assertEqual(res_justify_other.status_code, status.HTTP_403_FORBIDDEN)
+
+        # 4. Regular employee self-justifying own record -> 200 OK
+        res_justify_own = self.client.post(f'/api/attendance/exceptions/{own_exc.id}/justify/', {
+            'status': 'EXCUSED',
+            'reason': 'Clinic visit with medical certificate'
+        })
+        self.assertEqual(res_justify_own.status_code, status.HTTP_200_OK)
+        self.assertEqual(res_justify_own.data['status'], 'EXCUSED')

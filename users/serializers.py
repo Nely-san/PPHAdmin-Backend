@@ -25,6 +25,26 @@ class PersonDetailSerializer(serializers.ModelSerializer):
             'work_setup', 'notes', 'shift_code', 'work_days', 'has_government_deductions'
         ]
 
+    def to_representation(self, instance):
+        ret = super().to_representation(instance)
+        ret['biometricId'] = ret.get('biometric_id')
+        ret['personType'] = ret.get('person_type')
+        ret['employmentMode'] = ret.get('employment_mode')
+        ret['rateType'] = ret.get('rate_type')
+        ret['baseRate'] = float(ret.get('base_rate') or 0)
+        ret['dateStarted'] = ret.get('date_started')
+        ret['dateEnded'] = ret.get('date_ended')
+        ret['schoolName'] = ret.get('school_name')
+        ret['coordinatorContact'] = ret.get('coordinator_contact')
+        ret['requiredOjtHours'] = float(ret.get('required_ojt_hours') or 0) if ret.get('required_ojt_hours') is not None else None
+        ret['renderedOjtHours'] = float(ret.get('rendered_ojt_hours') or 0) if ret.get('rendered_ojt_hours') is not None else None
+        ret['isNewlyImported'] = ret.get('is_newly_imported')
+        ret['hasGovernmentDeductions'] = ret.get('has_government_deductions')
+        ret['workSetup'] = ret.get('work_setup')
+        ret['shiftCode'] = ret.get('shift_code')
+        ret['workDays'] = ret.get('work_days')
+        return ret
+
     def to_internal_value(self, data):
         mapped_data = data.copy() if hasattr(data, 'copy') else dict(data)
         camel_to_snake = {

@@ -48,6 +48,22 @@ class AttendanceRecordSerializer(serializers.ModelSerializer):
         ]
         read_only_fields = ['id', 'created_at', 'updated_at', 'is_archived', 'archived_at', 'archived_by']
 
+    def to_representation(self, instance):
+        ret = super().to_representation(instance)
+        ret['personId'] = ret.get('person')
+        ret['personName'] = ret.get('person_name')
+        ret['personType'] = ret.get('person_type')
+        ret['biometricId'] = ret.get('biometric_id')
+        ret['actualHours'] = float(ret.get('actual_hours') or 0)
+        ret['tardinessMinutes'] = int(ret.get('tardiness_minutes') or 0)
+        ret['isAbnormal'] = ret.get('is_abnormal')
+        ret['isAbsent'] = ret.get('is_absent')
+        ret['amIn'] = ret.get('am_in')
+        ret['amOut'] = ret.get('am_out')
+        ret['pmIn'] = ret.get('pm_in')
+        ret['pmOut'] = ret.get('pm_out')
+        return ret
+
 
 class AbnormalClockingSerializer(serializers.ModelSerializer):
     person_name = serializers.CharField(source='person.name', read_only=True)

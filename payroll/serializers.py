@@ -25,6 +25,20 @@ class PayrollRecordSerializer(serializers.ModelSerializer):
         ]
         read_only_fields = ['id', 'created_at', 'updated_at', 'is_archived', 'archived_at', 'archived_by']
 
+    def to_representation(self, instance):
+        ret = super().to_representation(instance)
+        ret['personId'] = ret.get('person')
+        ret['personName'] = ret.get('person_name')
+        ret['personType'] = ret.get('person_type')
+        ret['rateType'] = ret.get('rate_type')
+        ret['baseRate'] = float(ret.get('base_rate') or 0)
+        ret['cutoffStart'] = ret.get('cutoff_start')
+        ret['cutoffEnd'] = ret.get('cutoff_end')
+        ret['grossPay'] = float(ret.get('gross_pay') or 0)
+        ret['totalDeductions'] = float(ret.get('total_deductions') or 0)
+        ret['netPay'] = float(ret.get('net_pay') or 0)
+        return ret
+
 
 class SalaryRateAdjustmentSerializer(serializers.ModelSerializer):
     person_name = serializers.CharField(source='person.name', read_only=True)
