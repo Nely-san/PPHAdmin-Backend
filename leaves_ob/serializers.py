@@ -1,5 +1,5 @@
 from rest_framework import serializers
-from leaves_ob.models import LeaveOBApplication
+from leaves_ob.models import LeaveOBApplication, OvertimeApplication
 
 class LeaveOBApplicationSerializer(serializers.ModelSerializer):
     person_name = serializers.CharField(source='person.name', read_only=True)
@@ -37,3 +37,50 @@ class LeaveOBApplicationSerializer(serializers.ModelSerializer):
 class LeaveOBActionSerializer(serializers.Serializer):
     action = serializers.ChoiceField(choices=['APPROVED', 'REJECTED'])
     remarks = serializers.CharField(required=False, allow_blank=True, default='')
+
+    def validate(self, data):
+        if data.get('action') == 'REJECTED' and not (data.get('remarks') or '').strip():
+            raise serializers.ValidationError({'remarks': 'Remarks are required when rejecting an application.'})
+        return data
+
+
+class OvertimeApplicationSerializer(serializers.ModelSerializer):
+    person_name = serializers.CharField(source='person.name', read_only=True)
+    person_type = serializers.CharField(source='person.person_type', read_only=True)
+    biometric_id = serializers.CharField(source='person.biometric_id', read_only=True)
+    reviewed_by_username = serializers.CharField(source='reviewed_by.username', read_only=True)
+
+    class Meta:
+        model = OvertimeApplication
+        fields = [
+            'id', 'person', 'person_name', 'person_type', 'biometric_id',
+            'date', 'hours', 'reason', 'status',
+            'reviewed_by', 'reviewed_by_username', 'review_remarks', 'reviewed_at',
+            'is_archived', 'archived_at', 'archived_by', 'created_at', 'updated_at'
+        ]
+        read_only_fields = [
+            'id', 'reviewed_by', 'reviewed_at', 'created_at', 'updated_at',
+            'is_archived', 'archived_at', 'archived_by'
+        ]
+
+    def to_representation(self, instance):
+        ret = super().to_representation(instance)
+        ret['employeeId'] = ret.get('person')
+        ret['employeeName'] = ret.get('person_name')
+        ret['startDate'] = ret.get('date')
+        ret['endDate'] = ret.get('date')
+        ret['hours'] = float(ret.get('hours') or 0)
+        ret['totalDays'] = float(ret.get('hours') or 0)
+        ret['daysCount'] = float(ret.get('hours') or 0)
+        ret['requestType'] = 'OVERTIME'
+        return ret
+
+
+class OvertimeActionSerializer(serializers.Serializer):
+    action = serializers.ChoiceField(choices=['APPROVED', 'REJECTED'])
+    remarks = serializers.CharField(required=False, allow_blank=True, default='')
+
+    def validate(self, data):
+        if data.get('action') == 'REJECTED' and not (data.get('remarks') or '').strip():
+            raise serializers.ValidationError({'remarks': 'Remarks are required when rejecting an application.'})
+        return data

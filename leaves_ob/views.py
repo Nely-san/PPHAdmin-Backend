@@ -4,8 +4,13 @@ from rest_framework.response import Response
 from django.utils import timezone
 from django.db.models import Q
 
-from leaves_ob.models import LeaveOBApplication
-from leaves_ob.serializers import LeaveOBApplicationSerializer, LeaveOBActionSerializer
+from leaves_ob.models import LeaveOBApplication, OvertimeApplication
+from leaves_ob.serializers import (
+    LeaveOBApplicationSerializer,
+    LeaveOBActionSerializer,
+    OvertimeApplicationSerializer,
+    OvertimeActionSerializer,
+)
 
 from users.views import user_has_module_permission
 
@@ -119,3 +124,100 @@ class LeaveOBViewSet(viewsets.ModelViewSet):
         application.status = 'WITHDRAWN'
         application.save()
         return Response(LeaveOBApplicationSerializer(application).data)
+
+
+class OvertimeApplicationViewSet(viewsets.ModelViewSet):
+    """
+    CRUD ViewSet for Overtime Applications (/api/overtime/).
+    """
+    queryset = OvertimeApplication.objects.filter(is_archived=False).select_related('person', 'reviewed_by')
+    serializer_class = OvertimeApplicationSerializer
+    permission_classes = [permissions.IsAuthenticated]
+    pagination_class = None
+
+    def get_queryset(self):
+        qs = super().get_queryset()
+        status_val = self.request.query_params.get('status')
+        if status_val and status_val.upper() != 'ALL':
+            qs = qs.filter(status__iexact=status_val)
+
+        person_id = self.request.query_params.get('person') or self.request.query_params.get('personId')
+        if person_id:
+            qs = qs.filter(person_id=person_id)
+
+        date_val = self.request.query_params.get('date')
+        if date_val:
+            qs = qs.filter(date=date_val)
+
+        start_date = self.request.query_params.get('startDate') or self.request.query_params.get('start_date')
+        if start_date:
+            qs = qs.filter(date__gte=start_date)
+
+        end_date = self.request.query_params.get('endDate') or self.request.query_params.get('end_date')
+        if end_date:
+            qs = qs.filter(date__lte=end_date)
+
+        search = self.request.query_params.get('search')
+        if search and search.strip():
+            q = search.strip()
+            qs = qs.filter(
+                Q(person__name__icontains=q) |
+                Q(reason__icontains=q)
+            )
+
+        return qs
+
+    def perform_create(self, serializer):
+        # Auto-link person if not explicitly passed and user has linked person
+        person = serializer.validated_data.get('person')
+        if not person and hasattr(self.request.user, 'person'):
+            serializer.save(person=self.request.user.person)
+        else:
+            serializer.save()
+
+    @action(detail=False, methods=['get'], url_path='my-overtime')
+    def my_overtime(self, request):
+        person = getattr(request.user, 'person', None)
+        if not person:
+            return Response([])
+        records = OvertimeApplication.objects.filter(
+            person=person,
+            is_archived=False
+        ).select_related('person', 'reviewed_by').order_by('-date', '-created_at')
+        serializer = self.get_serializer(records, many=True)
+        return Response(serializer.data)
+
+    @action(detail=True, methods=['post'], url_path='action', permission_classes=[permissions.IsAuthenticated, HasLeaveApprovalPermission])
+    def process_action(self, request, pk=None):
+        """
+        HR Review / Approval / Rejection endpoint.
+        """
+        application = self.get_object()
+        serializer = OvertimeActionSerializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+
+        action_type = serializer.validated_data['action']
+        remarks = serializer.validated_data.get('remarks', '')
+
+        application.status = action_type
+        application.reviewed_by = request.user
+        application.review_remarks = remarks
+        application.reviewed_at = timezone.now()
+        application.save()
+
+        return Response(OvertimeApplicationSerializer(application).data)
+
+    @action(detail=True, methods=['post'], url_path='cancel')
+    def cancel(self, request, pk=None):
+        """
+        Allows applicant to cancel a pending application.
+        """
+        application = self.get_object()
+        if application.status != 'PENDING':
+            return Response(
+                {"detail": "Only pending applications can be cancelled."},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        application.status = 'CANCELLED'
+        application.save()
+        return Response(OvertimeApplicationSerializer(application).data)

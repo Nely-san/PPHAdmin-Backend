@@ -2,7 +2,7 @@ from datetime import date
 from rest_framework.test import APITestCase
 from rest_framework import status
 from users.models import User, Role, Person, PagePermission
-from leaves_ob.models import LeaveOBApplication
+from leaves_ob.models import LeaveOBApplication, OvertimeApplication
 from biometrics_attendance.models import AttendanceRecord
 from scheduling.models import Schedule
 
@@ -140,3 +140,106 @@ class LeavesOBTests(APITestCase):
         })
         self.assertEqual(res.status_code, status.HTTP_200_OK)
         self.assertEqual(res.data['status'], 'APPROVED')
+
+    def test_file_and_approve_overtime_application(self):
+        # 1. File Overtime Application
+        res = self.client.post('/api/overtime/', {
+            'person': str(self.person.id),
+            'date': '2026-04-10',
+            'hours': 3.5,
+            'reason': 'Inventory audit completion'
+        })
+        self.assertEqual(res.status_code, status.HTTP_201_CREATED)
+        ot_id = res.data['id']
+        self.assertEqual(res.data['status'], 'PENDING')
+        self.assertEqual(float(res.data['hours']), 3.5)
+
+        # 2. Approve Application
+        res2 = self.client.post(f'/api/overtime/{ot_id}/action/', {
+            'action': 'APPROVED',
+            'remarks': 'Approved for overtime pay.'
+        })
+        self.assertEqual(res2.status_code, status.HTTP_200_OK)
+        self.assertEqual(res2.data['status'], 'APPROVED')
+        self.assertEqual(res2.data['reviewed_by_username'], 'leave_approver')
+
+    def test_unauthorized_user_cannot_approve_overtime(self):
+        emp_role, _ = Role.objects.get_or_create(code='EMPLOYEE', defaults={'name': 'Employee'})
+        emp_user = User.objects.create_user(username='unauthorized_ot_emp', password='password123', role=emp_role)
+
+        app = OvertimeApplication.objects.create(
+            person=self.person,
+            date=date(2026, 4, 15),
+            hours=2.0,
+            reason='Project support',
+            status='PENDING'
+        )
+
+        # Employee (no attendance:leaves:edit) -> 403
+        self.client.force_authenticate(user=emp_user)
+        res = self.client.post(f'/api/overtime/{app.id}/action/', {
+            'action': 'APPROVED',
+            'remarks': 'Unauthorized approval'
+        })
+        self.assertEqual(res.status_code, status.HTTP_403_FORBIDDEN)
+
+        # Unauthenticated request -> 401
+        self.client.force_authenticate(user=None)
+        res_unauth = self.client.post(f'/api/overtime/{app.id}/action/', {
+            'action': 'APPROVED',
+            'remarks': 'Unauthenticated approval'
+        })
+        self.assertEqual(res_unauth.status_code, status.HTTP_401_UNAUTHORIZED)
+
+    def test_reject_overtime_requires_remarks(self):
+        app = OvertimeApplication.objects.create(
+            person=self.person,
+            date=date(2026, 4, 18),
+            hours=4.0,
+            reason='Extra shift',
+            status='PENDING'
+        )
+
+        # Rejection with blank remarks -> 400
+        res = self.client.post(f'/api/overtime/{app.id}/action/', {
+            'action': 'REJECTED',
+            'remarks': '   '
+        })
+        self.assertEqual(res.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn('remarks', res.data)
+
+        # Rejection with valid remarks -> 200
+        res2 = self.client.post(f'/api/overtime/{app.id}/action/', {
+            'action': 'REJECTED',
+            'remarks': 'Budget exceeded for the department.'
+        })
+        self.assertEqual(res2.status_code, status.HTTP_200_OK)
+        self.assertEqual(res2.data['status'], 'REJECTED')
+
+    def test_reject_leave_requires_remarks(self):
+        app = LeaveOBApplication.objects.create(
+            person=self.person,
+            request_type='VACATION_LEAVE',
+            start_date=date(2026, 4, 25),
+            end_date=date(2026, 4, 26),
+            total_days=2.0,
+            reason='Trip',
+            status='PENDING'
+        )
+
+        # Rejection with blank remarks -> 400
+        res = self.client.post(f'/api/leaves-ob/{app.id}/action/', {
+            'action': 'REJECTED',
+            'remarks': ''
+        })
+        self.assertEqual(res.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn('remarks', res.data)
+
+        # Rejection with valid remarks -> 200
+        res2 = self.client.post(f'/api/leaves-ob/{app.id}/action/', {
+            'action': 'REJECTED',
+            'remarks': 'Manpower shortage on requested dates.'
+        })
+        self.assertEqual(res2.status_code, status.HTTP_200_OK)
+        self.assertEqual(res2.data['status'], 'REJECTED')
+

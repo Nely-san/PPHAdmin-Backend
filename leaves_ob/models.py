@@ -37,3 +37,33 @@ class LeaveOBApplication(BaseModel):
 
     def __str__(self):
         return f"{self.person.name} - {self.get_request_type_display()} ({self.start_date} to {self.end_date}) [{self.status}]"
+
+
+class OvertimeApplication(BaseModel):
+    """
+    Overtime Application for extra work hours approval.
+    """
+    STATUS_CHOICES = [
+        ('PENDING', 'Pending HR Review'),
+        ('APPROVED', 'Approved'),
+        ('REJECTED', 'Rejected'),
+        ('CANCELLED', 'Cancelled by Employee'),
+    ]
+
+    person = models.ForeignKey('users.Person', on_delete=models.CASCADE, related_name='overtime_applications')
+    date = models.DateField(db_index=True)
+    hours = models.DecimalField(max_digits=4, decimal_places=1, default=1.0)
+    reason = models.TextField()
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='PENDING', db_index=True)
+
+    reviewed_by = models.ForeignKey('users.User', on_delete=models.SET_NULL, null=True, blank=True, related_name='reviewed_overtimes')
+    review_remarks = models.TextField(null=True, blank=True)
+    reviewed_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        db_table = 'overtime_applications'
+        ordering = ['-date', '-created_at']
+
+    def __str__(self):
+        return f"{self.person.name} - Overtime on {self.date} ({self.hours} hrs) [{self.status}]"
+
