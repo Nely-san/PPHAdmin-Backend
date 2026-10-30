@@ -1,9 +1,114 @@
 from django.utils import timezone
 from rest_framework import serializers
 from rest_framework_simplejwt.serializers import TokenObtainPairSerializer
-from users.models import User, Role, PagePermission, Person, Notification, NotificationPreference
+from users.models import (
+    User,
+    Role,
+    PagePermission,
+    Person,
+    PersonProfile,
+    CharacterReference,
+    Notification,
+    NotificationPreference,
+)
 
 from settings.serializers import PagePermissionSerializer, RoleSerializer
+
+
+class CharacterReferenceSelfServiceSerializer(serializers.ModelSerializer):
+    id = serializers.UUIDField(required=False)
+
+    class Meta:
+        model = CharacterReference
+        fields = [
+            'id',
+            'name',
+            'relationship',
+            'contact_number',
+            'email_address',
+            'position_or_company',
+            'display_order',
+        ]
+
+
+class PersonProfileSelfServiceSerializer(serializers.ModelSerializer):
+    character_references = CharacterReferenceSelfServiceSerializer(many=True)
+
+    class Meta:
+        model = PersonProfile
+        fields = [
+            'house_number',
+            'street',
+            'barangay',
+            'city_municipality',
+            'province_region',
+            'zip_code',
+            'landline',
+            'mobile_number',
+            'highest_education_attainment',
+            'course',
+            'education_school',
+            'year_graduated',
+            'character_references',
+        ]
+
+    def to_internal_value(self, data):
+        allowed_fields = set(self.fields.keys())
+        unknown_fields = set(data.keys()) - allowed_fields
+        if unknown_fields:
+            locked_fields = ', '.join(sorted(unknown_fields))
+            raise serializers.ValidationError({
+                'detail': f'Locked or unsupported profile fields: {locked_fields}',
+            })
+        return super().to_internal_value(data)
+
+    def validate_character_references(self, value):
+        if len(value) > 5:
+            raise serializers.ValidationError(
+                'A person profile may have at most 5 character references.'
+            )
+        return value
+
+    def update(self, instance, validated_data):
+        references_data = validated_data.pop('character_references', None)
+
+        for field, value in validated_data.items():
+            setattr(instance, field, value)
+        instance.save()
+
+        if references_data is not None:
+            submitted_ids = set()
+            for reference_data in references_data:
+                reference_id = reference_data.get('id')
+                if reference_id:
+                    reference = instance.character_references.filter(
+                        id=reference_id,
+                        is_archived=False,
+                    ).first()
+                    if reference is None:
+                        raise serializers.ValidationError({
+                            'character_references': 'Character reference does not belong to this profile.',
+                        })
+                    for field, value in reference_data.items():
+                        setattr(reference, field, value)
+                    reference.save()
+                    submitted_ids.add(reference.id)
+                else:
+                    reference = CharacterReference(
+                        person_profile=instance,
+                        **reference_data,
+                    )
+                    reference.full_clean(
+                        exclude=['id', 'created_at', 'updated_at', 'archived_at', 'archived_by']
+                    )
+                    reference.save()
+                    submitted_ids.add(reference.id)
+
+            instance.character_references.filter(is_archived=False).exclude(
+                id__in=submitted_ids
+            ).delete()
+
+        return instance
 
 
 class PersonDetailSerializer(serializers.ModelSerializer):
@@ -12,7 +117,7 @@ class PersonDetailSerializer(serializers.ModelSerializer):
     approval_status = serializers.CharField(source='user.approval_status', read_only=True, default=None)
     is_active = serializers.BooleanField(source='user.is_active', read_only=True, default=None)
 
-    biometric_id = serializers.CharField(required=False, allow_null=True, allow_blank=True)
+    biometric_id = serializers.CharField(read_only=True)
 
     class Meta:
         model = Person
@@ -68,13 +173,8 @@ class PersonDetailSerializer(serializers.ModelSerializer):
         for camel, snake in camel_to_snake.items():
             if camel in mapped_data and snake not in mapped_data:
                 mapped_data[snake] = mapped_data[camel]
-
-        if 'biometric_id' in mapped_data:
-            bio = mapped_data['biometric_id']
-            if bio is None or (isinstance(bio, str) and not bio.strip()):
-                mapped_data['biometric_id'] = None
-            else:
-                mapped_data['biometric_id'] = str(bio).strip()
+        mapped_data.pop('biometric_id', None)
+        mapped_data.pop('biometricId', None)
 
         return super().to_internal_value(mapped_data)
 
@@ -124,11 +224,12 @@ class UserProfileSerializer(serializers.ModelSerializer):
     role_detail = RoleSerializer(source='role', read_only=True)
     allowed_pages = serializers.SerializerMethodField()
     navigation = serializers.SerializerMethodField()
+    biometrics = serializers.SerializerMethodField()
     role_code = serializers.CharField(write_only=True, required=False)
     role_id = serializers.PrimaryKeyRelatedField(
         queryset=Role.objects.filter(is_archived=False), source='role', write_only=True, required=False
     )
-    person = PersonDetailSerializer(read_only=True)
+    person = serializers.SerializerMethodField()
     password = serializers.CharField(write_only=True, required=False)
     custom_permissions = PagePermissionSerializer(many=True, read_only=True)
     approved_by_username = serializers.CharField(source='approved_by.username', read_only=True)
@@ -142,8 +243,32 @@ class UserProfileSerializer(serializers.ModelSerializer):
             'role_code', 'role_id', 'person', 'password', 'is_active', 'is_staff', 
             'approval_status', 'rejection_reason', 'approved_by', 'approved_by_username',
             'approved_at', 'custom_permissions', 'is_archived', 'created_at',
-            'school_name', 'schoolName'
+            'school_name', 'schoolName', 'biometrics'
         ]
+
+    def get_person(self, obj):
+        person = getattr(obj, 'person', None)
+        if person is None:
+            return None
+
+        data = PersonDetailSerializer(person).data
+        data.pop('biometric_id', None)
+        data.pop('biometricId', None)
+        return data
+
+    def get_biometrics(self, obj):
+        person = getattr(obj, 'person', None)
+        if person is None:
+            return {
+                'is_enrolled': False,
+                'status': 'NOT_ENROLLED',
+            }
+
+        is_enrolled = bool(person.biometric_id and str(person.biometric_id).strip())
+        return {
+            'is_enrolled': is_enrolled,
+            'status': 'ENROLLED' if is_enrolled else 'NOT_ENROLLED',
+        }
 
     def get_role(self, obj):
         return obj.role.code if obj.role else 'EMPLOYEE'
@@ -545,5 +670,3 @@ class NotificationPreferenceSerializer(serializers.ModelSerializer):
             if camel in mapped_data and snake not in mapped_data:
                 mapped_data[snake] = mapped_data[camel]
         return super().to_internal_value(mapped_data)
-
-

@@ -18,7 +18,8 @@ except ImportError:
 from users.models import Person
 from scheduling.models import Shift, Schedule
 from biometrics_attendance.models import (
-    BiometricImportBatch, BiometricLog, AttendanceRecord, AbnormalClocking
+    BiometricImportBatch, BiometricLog, AttendanceRecord, AbnormalClocking,
+    BiometricEnrollment
 )
 
 def make_aware_if_needed(dt):
@@ -366,6 +367,15 @@ def process_biometric_import(file_obj, file_name, user_identifier='SYSTEM'):
     period_end = max(dates) if dates else timezone.now().date()
 
     with transaction.atomic():
+        file_bio_ids = {
+            r['biometric_id'] for r in raw_records if r.get('biometric_id')
+        }
+        revoked_external_ids = set(
+            BiometricEnrollment.objects
+            .filter(status='REVOKED', external_biometric_id__in=file_bio_ids)
+            .values_list('external_biometric_id', flat=True)
+        )
+
         batch = BiometricImportBatch.objects.create(
             file_name=file_name,
             period_start=period_start,
@@ -389,6 +399,10 @@ def process_biometric_import(file_obj, file_name, user_identifier='SYSTEM'):
                 continue
 
             person = None
+            is_revoked = bool(bio_id and bio_id in revoked_external_ids)
+            if is_revoked:
+                continue
+
             if bio_id:
                 person = Person.objects.filter(biometric_id=bio_id, is_archived=False).first()
 
@@ -397,6 +411,15 @@ def process_biometric_import(file_obj, file_name, user_identifier='SYSTEM'):
                 if person and not person.biometric_id and bio_id:
                     person.biometric_id = bio_id
                     person.save(update_fields=['biometric_id'])
+                    BiometricEnrollment.objects.create(
+                        person=person,
+                        external_biometric_id=bio_id,
+                        device_id='',
+                        device_name='Biometric import',
+                        enrolled_by=None,
+                        status='ENROLLED',
+                        is_active=True,
+                    )
 
             if not person:
                 person = Person.objects.create(
@@ -411,6 +434,16 @@ def process_biometric_import(file_obj, file_name, user_identifier='SYSTEM'):
                     date_started=rec_date
                 )
                 new_persons_created += 1
+                if bio_id:
+                    BiometricEnrollment.objects.create(
+                        person=person,
+                        external_biometric_id=bio_id,
+                        device_id='',
+                        device_name='Biometric import',
+                        enrolled_by=None,
+                        status='ENROLLED',
+                        is_active=True,
+                    )
 
             schedule = Schedule.objects.filter(person=person, date=rec_date, is_archived=False).first()
             shift = schedule.shift if schedule and schedule.shift else default_shift

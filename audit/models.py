@@ -17,6 +17,9 @@ class AuditLog(models.Model):
         ('REJECT', 'Rejected Transaction'),
         ('LOCK', 'Locked Cutoff Records'),
         ('PURGE', 'Permanent Purge'),
+        ('LINK_BIOMETRIC', 'Linked Biometric Enrollment'),
+        ('UNLINK_BIOMETRIC', 'Unlinked Biometric Enrollment'),
+        ('PROFILE_UPDATE', 'Updated Self-Service Profile'),
     ]
 
     id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)

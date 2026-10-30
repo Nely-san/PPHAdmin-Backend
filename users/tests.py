@@ -1,8 +1,481 @@
+from django.apps import apps
 from django.core.cache import cache
-from django.test import TestCase
+from django.core.exceptions import ValidationError
+from django.db import IntegrityError, connection
+from django.db.migrations.executor import MigrationExecutor
+from django.db.models.signals import post_save
+from django.test import TestCase, TransactionTestCase
 from rest_framework.test import APIClient
 from rest_framework import status
-from users.models import User, Role, PagePermission, Person
+from unittest.mock import patch
+from users.models import (
+    User,
+    Role,
+    PagePermission,
+    Person,
+    PersonProfile,
+    CharacterReference,
+    ensure_person_profile,
+)
+from biometrics_attendance.models import BiometricEnrollment
+
+
+class CurrentUserPrivacyTests(TestCase):
+    def setUp(self):
+        cache.clear()
+        self.client = APIClient()
+        self.employee_role, _ = Role.objects.get_or_create(
+            code='EMPLOYEE',
+            defaults={'name': 'Employee'},
+        )
+
+    def test_auth_me_masks_person_biometric_ids(self):
+        employee = User.objects.create_user(
+            username='privacy_employee',
+            password='Password123!',
+            role=self.employee_role,
+        )
+        person = Person.objects.filter(user=employee).first()
+        if person is None:
+            person = Person.objects.create(
+                user=employee,
+                name='Privacy Employee',
+                biometric_id='BIO-SECRET-123',
+                status='ACTIVE',
+            )
+        else:
+            person.name = 'Privacy Employee'
+            person.biometric_id = 'BIO-SECRET-123'
+            person.status = 'ACTIVE'
+            person.save(update_fields=['name', 'biometric_id', 'status'])
+        employee = User.objects.get(pk=employee.pk)
+
+        self.client.force_authenticate(employee)
+        response = self.client.get('/api/auth/me/')
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        person = response.data['person']
+        self.assertNotIn('biometric_id', person)
+        self.assertNotIn('biometricId', person)
+        self.assertEqual(
+            response.data['biometrics'],
+            {'is_enrolled': True, 'status': 'ENROLLED'},
+        )
+
+    def test_auth_me_handles_missing_person(self):
+        employee = User.objects.create_user(
+            username='no_person_admin',
+            password='Password123!',
+            role=self.employee_role,
+        )
+        auto_person = Person.objects.filter(user=employee).first()
+        if auto_person is not None:
+            auto_person.delete()
+        employee = User.objects.get(pk=employee.pk)
+
+        self.client.force_authenticate(employee)
+        response = self.client.get('/api/auth/me/')
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertIsNone(response.data['person'])
+        self.assertEqual(
+            response.data['biometrics'],
+            {'is_enrolled': False, 'status': 'NOT_ENROLLED'},
+        )
+
+    def test_admin_person_endpoint_keeps_both_biometric_keys(self):
+        admin = User.objects.create_superuser(
+            username='privacy_super_admin',
+            password='Password123!',
+        )
+        employee = User.objects.create_user(
+            username='admin_view_employee',
+            password='Password123!',
+            role=self.employee_role,
+        )
+        person = Person.objects.filter(user=employee).first()
+        if person is None:
+            person = Person.objects.create(
+                user=employee,
+                name='Admin View Employee',
+                biometric_id='BIO-ADMIN-123',
+                status='ACTIVE',
+            )
+        else:
+            person.name = 'Admin View Employee'
+            person.biometric_id = 'BIO-ADMIN-123'
+            person.status = 'ACTIVE'
+            person.save(update_fields=['name', 'biometric_id', 'status'])
+
+        self.client.force_authenticate(admin)
+        response = self.client.get(f'/api/persons/{person.id}/')
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data['biometric_id'], 'BIO-ADMIN-123')
+        self.assertEqual(response.data['biometricId'], 'BIO-ADMIN-123')
+
+
+class BiometricEndpointTests(TestCase):
+    def setUp(self):
+        cache.clear()
+        self.client = APIClient()
+        self.hr_role, _ = Role.objects.get_or_create(
+            code='HR_MANAGER',
+            defaults={'name': 'HR Manager'},
+        )
+        self.employee_role, _ = Role.objects.get_or_create(
+            code='EMPLOYEE',
+            defaults={'name': 'Employee'},
+        )
+        self.edit_permission, _ = PagePermission.objects.get_or_create(
+            code='employees:edit',
+            defaults={'name': 'Employees Edit', 'module': 'HR'},
+        )
+        self.delete_permission, _ = PagePermission.objects.get_or_create(
+            code='employees:delete',
+            defaults={'name': 'Employees Delete', 'module': 'HR'},
+        )
+        self.add_permission, _ = PagePermission.objects.get_or_create(
+            code='employees:add',
+            defaults={'name': 'Employees Add', 'module': 'HR'},
+        )
+        self.admin = User.objects.create_superuser(
+            username='biometric_admin',
+            password='Password123!',
+        )
+        self.person = Person.objects.create(
+            name='Endpoint Employee',
+            status='ACTIVE',
+        )
+
+    def test_link_creates_enrollment_and_updates_person(self):
+        self.client.force_authenticate(self.admin)
+        response = self.client.post(
+            f'/api/persons/{self.person.id}/link-biometric/',
+            {'external_biometric_id': ' LINK-100 '},
+            format='json',
+        )
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.person.refresh_from_db()
+        self.assertEqual(self.person.biometric_id, 'LINK-100')
+        enrollment = BiometricEnrollment.objects.get(person=self.person)
+        self.assertEqual(enrollment.external_biometric_id, 'LINK-100')
+        self.assertEqual(enrollment.status, 'ENROLLED')
+        self.assertTrue(enrollment.is_active)
+
+    def test_link_duplicate_external_id_returns_400_without_write(self):
+        other = Person.objects.create(name='Other Person', status='ACTIVE')
+        BiometricEnrollment.objects.create(
+            person=other,
+            external_biometric_id='DUPLICATE-ID',
+            status='ENROLLED',
+            is_active=True,
+        )
+        self.client.force_authenticate(self.admin)
+        response = self.client.post(
+            f'/api/persons/{self.person.id}/link-biometric/',
+            {'external_biometric_id': 'DUPLICATE-ID'},
+            format='json',
+        )
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(
+            response.data['detail'],
+            'This biometric ID is already actively enrolled to another person.',
+        )
+        self.person.refresh_from_db()
+        self.assertIsNone(self.person.biometric_id)
+
+    def test_link_duplicate_active_person_returns_400_without_write(self):
+        old = BiometricEnrollment.objects.create(
+            person=self.person,
+            external_biometric_id='OLD-ID',
+            status='ENROLLED',
+            is_active=True,
+        )
+        self.person.biometric_id = 'OLD-ID'
+        self.person.save(update_fields=['biometric_id'])
+        self.client.force_authenticate(self.admin)
+        response = self.client.post(
+            f'/api/persons/{self.person.id}/link-biometric/',
+            {'external_biometric_id': 'NEW-ID'},
+            format='json',
+        )
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertEqual(
+            response.data['detail'],
+            'This person already has an active biometric enrollment.',
+        )
+        old.refresh_from_db()
+        self.person.refresh_from_db()
+        self.assertEqual(old.status, 'ENROLLED')
+        self.assertTrue(old.is_active)
+        self.assertEqual(self.person.biometric_id, 'OLD-ID')
+
+    def test_link_database_failure_rolls_back_person_and_enrollment(self):
+        self.client.force_authenticate(self.admin)
+        with patch(
+            'biometrics_attendance.models.BiometricEnrollment.objects.create',
+            side_effect=IntegrityError('database failure'),
+        ):
+            response = self.client.post(
+                f'/api/persons/{self.person.id}/link-biometric/',
+                {'external_biometric_id': 'ROLLBACK-ID'},
+                format='json',
+            )
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.person.refresh_from_db()
+        self.assertIsNone(self.person.biometric_id)
+        self.assertFalse(
+            BiometricEnrollment.objects.filter(person=self.person).exists()
+        )
+
+    def test_link_second_write_failure_rolls_back_first_write(self):
+        old = BiometricEnrollment.objects.create(
+            person=self.person,
+            external_biometric_id='OLD-ROLLBACK-ID',
+            status='ENROLLED',
+            is_active=True,
+        )
+        self.person.biometric_id = 'OLD-ROLLBACK-ID'
+        self.person.save(update_fields=['biometric_id'])
+        self.client.force_authenticate(self.admin)
+
+        with patch(
+            'biometrics_attendance.models.BiometricEnrollment.objects.create',
+            side_effect=IntegrityError('forced second-write failure'),
+        ):
+            response = self.client.post(
+                f'/api/persons/{self.person.id}/link-biometric/',
+                {'external_biometric_id': 'NEW-ROLLBACK-ID'},
+                format='json',
+            )
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        old.refresh_from_db()
+        self.person.refresh_from_db()
+        self.assertEqual(old.status, 'ENROLLED')
+        self.assertTrue(old.is_active)
+        self.assertEqual(self.person.biometric_id, 'OLD-ROLLBACK-ID')
+        self.assertFalse(
+            BiometricEnrollment.objects.filter(
+                person=self.person,
+                external_biometric_id='NEW-ROLLBACK-ID',
+            ).exists()
+        )
+
+    def test_link_lock_order_is_person_then_enrollment(self):
+        calls = []
+        original_person_lock = Person.objects.select_for_update
+        original_enrollment_lock = BiometricEnrollment.objects.select_for_update
+
+        def lock_person():
+            calls.append('person')
+            return original_person_lock()
+
+        def lock_enrollment():
+            calls.append('enrollment')
+            return original_enrollment_lock()
+
+        self.client.force_authenticate(self.admin)
+        with patch.object(
+            Person.objects,
+            'select_for_update',
+            side_effect=lock_person,
+        ), patch.object(
+            BiometricEnrollment.objects,
+            'select_for_update',
+            side_effect=lock_enrollment,
+        ):
+            response = self.client.post(
+                f'/api/persons/{self.person.id}/link-biometric/',
+                {'external_biometric_id': 'LOCK-ORDER-ID'},
+                format='json',
+            )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(calls[:2], ['person', 'enrollment'])
+
+    def test_link_add_only_user_forbidden(self):
+        user = User.objects.create_user(
+            username='add_only_biometric',
+            password='Password123!',
+            role=self.hr_role,
+        )
+        user.custom_permissions.add(self.add_permission)
+        self.client.force_authenticate(user)
+        response = self.client.post(
+            f'/api/persons/{self.person.id}/link-biometric/',
+            {'external_biometric_id': 'ADD-ONLY-ID'},
+            format='json',
+        )
+        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+
+    def test_unlink_revokes_and_clears_person(self):
+        enrollment = BiometricEnrollment.objects.create(
+            person=self.person,
+            external_biometric_id='UNLINK-ID',
+            status='ENROLLED',
+            is_active=True,
+        )
+        self.person.biometric_id = 'UNLINK-ID'
+        self.person.save(update_fields=['biometric_id'])
+        self.client.force_authenticate(self.admin)
+        response = self.client.post(
+            f'/api/persons/{self.person.id}/unlink-biometric/',
+            {},
+            format='json',
+        )
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        enrollment.refresh_from_db()
+        self.person.refresh_from_db()
+        self.assertEqual(enrollment.status, 'REVOKED')
+        self.assertFalse(enrollment.is_active)
+        self.assertIsNone(self.person.biometric_id)
+
+    def test_unlink_edit_only_user_forbidden(self):
+        user = User.objects.create_user(
+            username='edit_only_biometric',
+            password='Password123!',
+            role=self.hr_role,
+        )
+        user.custom_permissions.add(self.edit_permission)
+        self.client.force_authenticate(user)
+        response = self.client.post(
+            f'/api/persons/{self.person.id}/unlink-biometric/',
+            {},
+            format='json',
+        )
+        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+
+    def test_unlink_second_write_failure_rolls_back(self):
+        enrollment = BiometricEnrollment.objects.create(
+            person=self.person,
+            external_biometric_id='UNLINK-ROLLBACK-ID',
+            status='ENROLLED',
+            is_active=True,
+        )
+        self.person.biometric_id = 'UNLINK-ROLLBACK-ID'
+        self.person.save(update_fields=['biometric_id'])
+        self.client.force_authenticate(self.admin)
+        self.client.raise_request_exception = False
+
+        with patch.object(
+            Person,
+            'save',
+            side_effect=IntegrityError('forced unlink second-write failure'),
+        ):
+            response = self.client.post(
+                f'/api/persons/{self.person.id}/unlink-biometric/',
+                {},
+                format='json',
+            )
+
+        self.assertEqual(response.status_code, status.HTTP_500_INTERNAL_SERVER_ERROR)
+        enrollment.refresh_from_db()
+        self.person.refresh_from_db()
+        self.assertEqual(enrollment.status, 'ENROLLED')
+        self.assertTrue(enrollment.is_active)
+        self.assertEqual(self.person.biometric_id, 'UNLINK-ROLLBACK-ID')
+
+    def test_unlink_lock_order_is_person_then_enrollment(self):
+        BiometricEnrollment.objects.create(
+            person=self.person,
+            external_biometric_id='UNLINK-LOCK-ID',
+            status='ENROLLED',
+            is_active=True,
+        )
+        self.person.biometric_id = 'UNLINK-LOCK-ID'
+        self.person.save(update_fields=['biometric_id'])
+        calls = []
+        original_person_lock = Person.objects.select_for_update
+        original_enrollment_lock = BiometricEnrollment.objects.select_for_update
+
+        def lock_person():
+            calls.append('person')
+            return original_person_lock()
+
+        def lock_enrollment():
+            calls.append('enrollment')
+            return original_enrollment_lock()
+
+        self.client.force_authenticate(self.admin)
+        with patch.object(
+            Person.objects,
+            'select_for_update',
+            side_effect=lock_person,
+        ), patch.object(
+            BiometricEnrollment.objects,
+            'select_for_update',
+            side_effect=lock_enrollment,
+        ):
+            response = self.client.post(
+                f'/api/persons/{self.person.id}/unlink-biometric/',
+                {},
+                format='json',
+            )
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(calls[:2], ['person', 'enrollment'])
+
+    def test_unlink_without_active_enrollment_returns_404(self):
+        self.client.force_authenticate(self.admin)
+        response = self.client.post(
+            f'/api/persons/{self.person.id}/unlink-biometric/',
+            {},
+            format='json',
+        )
+        self.assertEqual(response.status_code, status.HTTP_404_NOT_FOUND)
+
+    def test_put_with_biometric_id_ignores_write(self):
+        self.person.biometric_id = 'UNCHANGED-ID'
+        self.person.save(update_fields=['biometric_id'])
+        self.client.force_authenticate(self.admin)
+        response = self.client.put(
+            f'/api/persons/{self.person.id}/',
+            {'name': 'Updated Name', 'biometricId': '101'},
+            format='json',
+        )
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.person.refresh_from_db()
+        self.assertEqual(self.person.name, 'Updated Name')
+        self.assertEqual(self.person.biometric_id, 'UNCHANGED-ID')
+        self.assertFalse(
+            BiometricEnrollment.objects.filter(person=self.person).exists()
+        )
+
+    def test_link_audit_failure_does_not_roll_back(self):
+        from unittest.mock import patch
+        self.client.force_authenticate(self.admin)
+        with patch('users.views.record_audit_log', side_effect=RuntimeError('audit unavailable')):
+            response = self.client.post(
+                f'/api/persons/{self.person.id}/link-biometric/',
+                {'external_biometric_id': 'AUDIT-LINK-ID'},
+                format='json',
+            )
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.person.refresh_from_db()
+        self.assertEqual(self.person.biometric_id, 'AUDIT-LINK-ID')
+
+    def test_unlink_audit_failure_does_not_roll_back(self):
+        from unittest.mock import patch
+        BiometricEnrollment.objects.create(
+            person=self.person,
+            external_biometric_id='AUDIT-UNLINK-ID',
+            status='ENROLLED',
+            is_active=True,
+        )
+        self.person.biometric_id = 'AUDIT-UNLINK-ID'
+        self.person.save(update_fields=['biometric_id'])
+        self.client.force_authenticate(self.admin)
+        with patch('users.views.record_audit_log', side_effect=RuntimeError('audit unavailable')):
+            response = self.client.post(
+                f'/api/persons/{self.person.id}/unlink-biometric/',
+                {},
+                format='json',
+            )
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.person.refresh_from_db()
+        self.assertIsNone(self.person.biometric_id)
 
 
 class AccountApprovalTests(TestCase):
@@ -604,3 +1077,352 @@ class UserManagementSchoolTests(TestCase):
 
         person.refresh_from_db()
         self.assertEqual(person.school_name, 'New University of Science and Tech')
+
+
+class PersonProfileSelfServiceApiTests(TestCase):
+    def setUp(self):
+        self.client = APIClient()
+        self.role, _ = Role.objects.get_or_create(
+            code='EMPLOYEE',
+            defaults={'name': 'Employee'},
+        )
+        self.user = User.objects.create_user(
+            username='profile_api_employee',
+            password='Password123!',
+            role=self.role,
+        )
+        self.person = Person.objects.filter(user=self.user).first()
+        if self.person is None:
+            self.person = Person.objects.create(
+                user=self.user,
+                name='Profile API Employee',
+                status='ACTIVE',
+            )
+        self.profile = self.person.profile_extension
+        self.client.force_authenticate(self.user)
+
+    def test_patch_profile_updates_allowed_fields(self):
+        response = self.client.patch('/api/auth/me/', {
+            'house_number': '123',
+            'city_municipality': 'Quezon City',
+            'highest_education_attainment': 'College',
+            'course': 'Computer Science',
+            'year_graduated': 2024,
+        }, format='json')
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.profile.refresh_from_db()
+        self.assertEqual(self.profile.house_number, '123')
+        self.assertEqual(self.profile.city_municipality, 'Quezon City')
+        self.assertEqual(self.profile.course, 'Computer Science')
+        self.assertEqual(self.profile.year_graduated, 2024)
+        self.assertEqual(response.data['profile']['house_number'], '123')
+
+    def test_patch_profile_rejects_locked_fields(self):
+        self.profile.tin_number = 'OLD-TIN'
+        self.profile.property_status = 'OLD-STATUS'
+        self.profile.save()
+
+        response = self.client.patch('/api/auth/me/', {
+            'tin_number': 'NEW-TIN',
+            'property_status': 'ACCREDITED',
+        }, format='json')
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.profile.refresh_from_db()
+        self.assertEqual(self.profile.tin_number, 'OLD-TIN')
+        self.assertEqual(self.profile.property_status, 'OLD-STATUS')
+
+    def test_patch_character_references_crud(self):
+        first = CharacterReference.objects.create(
+            person_profile=self.profile,
+            name='Old Reference',
+            contact_number='09170000001',
+        )
+        deleted = CharacterReference.objects.create(
+            person_profile=self.profile,
+            name='Delete Reference',
+            contact_number='09170000002',
+        )
+
+        response = self.client.patch('/api/auth/me/', {
+            'character_references': [
+                {
+                    'id': str(first.id),
+                    'name': 'Updated Reference',
+                    'contact_number': '09179999999',
+                    'relationship': 'Former Manager',
+                },
+                {
+                    'name': 'New Reference',
+                    'contact_number': '09178888888',
+                    'relationship': 'Colleague',
+                },
+            ],
+        }, format='json')
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        first.refresh_from_db()
+        self.assertEqual(first.name, 'Updated Reference')
+        self.assertEqual(first.contact_number, '09179999999')
+        self.assertFalse(CharacterReference.objects.filter(pk=deleted.pk).exists())
+        self.assertTrue(CharacterReference.objects.filter(
+            person_profile=self.profile,
+            name='New Reference',
+        ).exists())
+
+    def test_patch_rejects_more_than_5_references(self):
+        response = self.client.patch('/api/auth/me/', {
+            'character_references': [
+                {'name': f'Reference {index}', 'contact_number': f'0917000000{index}'}
+                for index in range(6)
+            ],
+        }, format='json')
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertFalse(
+            CharacterReference.objects.filter(person_profile=self.profile).exists()
+        )
+
+    def test_patch_atomicity(self):
+        self.profile.house_number = 'Before'
+        self.profile.save()
+        old_reference_count = CharacterReference.objects.filter(
+            person_profile=self.profile
+        ).count()
+
+        with patch(
+            'users.serializers.CharacterReference.save',
+            side_effect=IntegrityError('forced reference failure'),
+        ):
+            response = self.client.patch('/api/auth/me/', {
+                'house_number': 'After',
+                'character_references': [
+                    {'name': 'Atomic Reference', 'contact_number': '09171111111'}
+                ],
+            }, format='json')
+
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.profile.refresh_from_db()
+        self.assertEqual(self.profile.house_number, 'Before')
+        self.assertEqual(
+            CharacterReference.objects.filter(person_profile=self.profile).count(),
+            old_reference_count,
+        )
+
+
+class PersonProfileModelTests(TestCase):
+    def test_creating_person_creates_profile_via_signal(self):
+        person = Person.objects.create(name='Signal Profile Employee')
+
+        self.assertTrue(PersonProfile.objects.filter(person=person).exists())
+
+    def test_person_save_does_not_create_duplicate_profile(self):
+        person = Person.objects.create(name='Single Profile Employee')
+        first_profile = person.profile_extension
+
+        person.name = 'Renamed Profile Employee'
+        person.save()
+
+        person.refresh_from_db()
+        self.assertEqual(person.profile_extension.pk, first_profile.pk)
+        self.assertEqual(PersonProfile.objects.filter(person=person).count(), 1)
+
+    def test_deleting_person_cascades_profile(self):
+        person = Person.objects.create(name='Cascade Profile Employee')
+        profile = person.profile_extension
+
+        person.delete()
+
+        self.assertFalse(PersonProfile.objects.filter(pk=profile.pk).exists())
+
+    def test_character_reference_creates_for_profile(self):
+        person = Person.objects.create(name='Reference Employee')
+
+        reference = CharacterReference.objects.create(
+            person_profile=person.profile_extension,
+            name='Jane Reference',
+            relationship='Former Supervisor',
+            contact_number='09171234567',
+        )
+
+        self.assertEqual(
+            person.profile_extension.character_references.get().pk,
+            reference.pk,
+        )
+
+    def test_sixth_character_reference_exceeds_limit(self):
+        person = Person.objects.create(name='Reference Limit Employee')
+        profile = person.profile_extension
+        for index in range(5):
+            CharacterReference.objects.create(
+                person_profile=profile,
+                name=f'Reference {index + 1}',
+                contact_number=f'0917000000{index}',
+                display_order=index,
+            )
+
+        sixth = CharacterReference(
+            person_profile=profile,
+            name='Reference 6',
+            contact_number='09170000006',
+            display_order=5,
+        )
+        with self.assertRaises(ValidationError):
+            sixth.clean()
+
+    def test_archived_character_reference_does_not_count_toward_limit(self):
+        person = Person.objects.create(name='Archived Reference Employee')
+        profile = person.profile_extension
+        for index in range(5):
+            CharacterReference.objects.create(
+                person_profile=profile,
+                name=f'Reference {index + 1}',
+                contact_number=f'0918000000{index}',
+                is_archived=index == 0,
+                display_order=index,
+            )
+
+        replacement = CharacterReference(
+            person_profile=profile,
+            name='Replacement Reference',
+            contact_number='09180000005',
+            display_order=5,
+        )
+        replacement.clean()
+
+    def test_deleting_profile_cascades_character_references(self):
+        person = Person.objects.create(name='Reference Cascade Employee')
+        profile = person.profile_extension
+        reference = CharacterReference.objects.create(
+            person_profile=profile,
+            name='Cascade Reference',
+            contact_number='09191234567',
+        )
+
+        profile.delete()
+
+        self.assertFalse(CharacterReference.objects.filter(pk=reference.pk).exists())
+
+    def test_profile_accepts_nullable_contact_education_and_hr_fields(self):
+        person = Person.objects.create(name='Nullable Profile Employee')
+        profile = person.profile_extension
+
+        profile.house_number = None
+        profile.highest_education_attainment = None
+        profile.prc_license_number = None
+        profile.save()
+        profile.refresh_from_db()
+
+        self.assertIsNone(profile.house_number)
+        self.assertIsNone(profile.highest_education_attainment)
+        self.assertIsNone(profile.prc_license_number)
+
+    def test_negative_year_graduated_is_rejected_by_clean(self):
+        person = Person.objects.create(name='Negative Year Employee')
+        profile = person.profile_extension
+        profile.year_graduated = -1
+
+        with self.assertRaises(ValidationError) as context:
+            profile.clean()
+
+        self.assertIn('year_graduated', context.exception.message_dict)
+
+    def test_profile_locked_hr_and_property_fields_save_without_person_changes(self):
+        person = Person.objects.create(
+            name='HR Property Employee',
+            status='ACTIVE',
+        )
+        profile = person.profile_extension
+        profile.prc_license_number = 'PRC-12345'
+        profile.hlurb_license_number = 'HLURB-67890'
+        profile.partners_recruiter = 'Recruiter One'
+        profile.team_director = 'Director One'
+        profile.property_status = 'ACCREDITED'
+        profile.save()
+
+        person.refresh_from_db()
+        profile.refresh_from_db()
+        self.assertEqual(person.name, 'HR Property Employee')
+        self.assertEqual(person.status, 'ACTIVE')
+        self.assertEqual(profile.prc_license_number, 'PRC-12345')
+        self.assertEqual(profile.hlurb_license_number, 'HLURB-67890')
+        self.assertEqual(profile.property_status, 'ACCREDITED')
+
+    def test_profile_contact_and_education_fields_save(self):
+        person = Person.objects.create(name='Editable Profile Employee')
+        profile = person.profile_extension
+        profile.house_number = '123'
+        profile.street = 'Phase 2 Street'
+        profile.highest_education_attainment = 'College'
+        profile.course = 'Computer Science'
+        profile.education_school = 'Phase 2 University'
+        profile.year_graduated = 2024
+        profile.save()
+
+        profile.refresh_from_db()
+        self.assertEqual(profile.house_number, '123')
+        self.assertEqual(profile.course, 'Computer Science')
+        self.assertEqual(profile.year_graduated, 2024)
+
+
+class PersonProfileMigrationTests(TransactionTestCase):
+    migrate_from = [('users', '0005_remove_person_company_name_and_more')]
+    migrate_to = [('users', '0006_personprofile_characterreference')]
+
+    def setUp(self):
+        super().setUp()
+        self.executor = MigrationExecutor(connection)
+        self.executor.migrate(self.migrate_from)
+        post_save.disconnect(ensure_person_profile, sender=Person)
+
+    def tearDown(self):
+        executor = MigrationExecutor(connection)
+        executor.migrate(self.migrate_to)
+        post_save.connect(ensure_person_profile, sender=Person)
+        super().tearDown()
+
+    def test_migration_backfills_profiles_for_existing_persons_without_changes(self):
+        Person = apps.get_model('users', 'Person')
+        person = Person.objects.create(
+            name='Migrated Existing Employee',
+            status='ACTIVE',
+        )
+        person_id = person.id
+        original_name = person.name
+
+        self.executor = MigrationExecutor(connection)
+        self.executor.migrate(self.migrate_to)
+        new_apps = self.executor.loader.project_state(self.migrate_to).apps
+        NewPerson = new_apps.get_model('users', 'Person')
+        NewPersonProfile = new_apps.get_model('users', 'PersonProfile')
+
+        migrated_person = NewPerson.objects.get(pk=person_id)
+        profile = NewPersonProfile.objects.get(person_id=person_id)
+        self.assertEqual(migrated_person.name, original_name)
+        self.assertEqual(migrated_person.status, 'ACTIVE')
+        self.assertEqual(profile.person_id, person_id)
+
+    def test_migration_reverse_removes_extension_data_without_changing_person(self):
+        Person = apps.get_model('users', 'Person')
+        person = Person.objects.create(
+            name='Migration Reverse Employee',
+            status='ACTIVE',
+        )
+        person_id = person.id
+
+        self.executor = MigrationExecutor(connection)
+        self.executor.migrate(self.migrate_to)
+        new_apps = self.executor.loader.project_state(self.migrate_to).apps
+        NewPerson = new_apps.get_model('users', 'Person')
+        NewPersonProfile = new_apps.get_model('users', 'PersonProfile')
+
+        self.assertTrue(NewPersonProfile.objects.filter(person_id=person_id).exists())
+
+        self.executor = MigrationExecutor(connection)
+        self.executor.migrate(self.migrate_from)
+        historical_apps = self.executor.loader.project_state(self.migrate_from).apps
+        HistoricalPerson = historical_apps.get_model('users', 'Person')
+        migrated_person = HistoricalPerson.objects.get(pk=person_id)
+        self.assertEqual(migrated_person.name, 'Migration Reverse Employee')
+        self.assertEqual(migrated_person.status, 'ACTIVE')

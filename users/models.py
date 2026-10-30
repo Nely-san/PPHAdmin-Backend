@@ -237,8 +237,105 @@ class Person(BaseModel):
         super().restore()
 
 
+class PersonProfile(BaseModel):
+    person = models.OneToOneField(
+        'users.Person',
+        on_delete=models.CASCADE,
+        related_name='profile_extension',
+    )
+
+    partners_code = models.CharField(max_length=50, null=True, blank=True, db_index=True)
+    birth_date = models.DateField(null=True, blank=True)
+    birth_place = models.CharField(max_length=255, null=True, blank=True)
+    citizenship = models.CharField(max_length=100, null=True, blank=True)
+    gender = models.CharField(max_length=20, null=True, blank=True)
+    civil_status = models.CharField(max_length=20, null=True, blank=True)
+    tin_number = models.CharField(max_length=50, null=True, blank=True)
+    registration_date = models.DateField(null=True, blank=True)
+
+    house_number = models.CharField(max_length=50, null=True, blank=True)
+    street = models.CharField(max_length=255, null=True, blank=True)
+    barangay = models.CharField(max_length=255, null=True, blank=True)
+    city_municipality = models.CharField(max_length=255, null=True, blank=True)
+    province_region = models.CharField(max_length=255, null=True, blank=True)
+    zip_code = models.CharField(max_length=20, null=True, blank=True)
+    landline = models.CharField(max_length=50, null=True, blank=True)
+    mobile_number = models.CharField(max_length=50, null=True, blank=True)
+
+    highest_education_attainment = models.CharField(max_length=100, null=True, blank=True)
+    course = models.CharField(max_length=255, null=True, blank=True)
+    education_school = models.CharField(max_length=255, null=True, blank=True)
+    year_graduated = models.PositiveIntegerField(null=True, blank=True)
+
+    property_status = models.CharField(max_length=100, null=True, blank=True)
+    accreditation_date = models.DateField(null=True, blank=True)
+    current_position = models.CharField(max_length=255, null=True, blank=True)
+    previous_position = models.CharField(max_length=255, null=True, blank=True)
+    position_time_period = models.CharField(max_length=255, null=True, blank=True)
+    prc_license_number = models.CharField(max_length=100, null=True, blank=True)
+    prc_license_time_period = models.CharField(max_length=255, null=True, blank=True)
+    hlurb_license_number = models.CharField(max_length=100, null=True, blank=True)
+    hlurb_license_time_period = models.CharField(max_length=255, null=True, blank=True)
+    partners_recruiter = models.CharField(max_length=255, null=True, blank=True)
+    executive_partner = models.CharField(max_length=255, null=True, blank=True)
+    team_director = models.CharField(max_length=255, null=True, blank=True)
+    division_broker = models.CharField(max_length=255, null=True, blank=True)
+
+    class Meta:
+        db_table = 'person_profiles'
+
+    def __str__(self):
+        return f"Profile for {self.person.name}"
+
+    def clean(self):
+        super().clean()
+        if self.year_graduated is not None and self.year_graduated < 0:
+            raise ValidationError({
+                'year_graduated': 'Year graduated cannot be negative.',
+            })
+
+
+class CharacterReference(BaseModel):
+    person_profile = models.ForeignKey(
+        'users.PersonProfile',
+        on_delete=models.CASCADE,
+        related_name='character_references',
+    )
+    name = models.CharField(max_length=255)
+    relationship = models.CharField(max_length=100, null=True, blank=True)
+    contact_number = models.CharField(max_length=50)
+    email_address = models.EmailField(max_length=254, null=True, blank=True)
+    position_or_company = models.CharField(max_length=255, null=True, blank=True)
+    display_order = models.PositiveSmallIntegerField(default=0)
+
+    class Meta:
+        db_table = 'character_references'
+        ordering = ['display_order', 'created_at']
+
+    def __str__(self):
+        return self.name
+
+    def clean(self):
+        super().clean()
+        if self.person_profile_id:
+            count = type(self).objects.filter(
+                person_profile_id=self.person_profile_id,
+                is_archived=False,
+            ).exclude(pk=self.pk).count()
+            if count >= 5:
+                raise ValidationError({
+                    'display_order': 'A person profile may have at most 5 character references.',
+                })
+
+
 from django.db.models.signals import post_save
 from django.dispatch import receiver
+
+
+@receiver(post_save, sender=Person)
+def ensure_person_profile(sender, instance, created, **kwargs):
+    PersonProfile.objects.get_or_create(person=instance)
+
 
 @receiver(post_save, sender=User)
 def ensure_person_for_user(sender, instance, created, **kwargs):
@@ -310,4 +407,3 @@ class NotificationPreference(BaseModel):
 
     def __str__(self):
         return f"Preferences for {self.user.username}"
-

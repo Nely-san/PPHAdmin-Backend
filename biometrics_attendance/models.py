@@ -1,5 +1,6 @@
 import uuid
 from django.db import models
+from django.core.exceptions import ValidationError
 from settings.models import BaseModel
 
 class BiometricImportBatch(BaseModel):
@@ -53,6 +54,83 @@ class BiometricLog(models.Model):
 
     def __str__(self):
         return f"Scan {self.biometric_id} at {self.timestamp} ({self.log_type})"
+
+
+class BiometricEnrollment(BaseModel):
+    STATUS_CHOICES = [
+        ('ENROLLED', 'Enrolled'),
+        ('REVOKED', 'Revoked'),
+    ]
+
+    person = models.ForeignKey(
+        'users.Person',
+        on_delete=models.CASCADE,
+        related_name='biometric_enrollments',
+    )
+    device_name = models.CharField(max_length=255, blank=True, default='')
+    device_id = models.CharField(max_length=50, blank=True, default='', db_index=True)
+    external_biometric_id = models.CharField(max_length=50, db_index=True)
+    enrolled_at = models.DateTimeField(auto_now_add=True)
+    enrolled_by = models.ForeignKey(
+        'users.User',
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='biometric_enrollments',
+    )
+    status = models.CharField(
+        max_length=20,
+        choices=STATUS_CHOICES,
+        default='ENROLLED',
+    )
+    is_active = models.BooleanField(default=True, db_index=True)
+
+    class Meta:
+        db_table = 'biometric_enrollments'
+        ordering = ['-enrolled_at']
+        indexes = [
+            models.Index(
+                fields=['person', 'status', 'is_active'],
+                name='bio_enroll_person_status_idx',
+            ),
+            models.Index(
+                fields=['external_biometric_id', 'status'],
+                name='bio_enroll_external_status_idx',
+            ),
+        ]
+        # MySQL uses generated-column unique indexes for active-record uniqueness.
+        # conditional UniqueConstraint entries are intentionally not used here.
+
+    def clean(self):
+        super().clean()
+        if self.status == 'ENROLLED' and self.is_active:
+            duplicate_external = type(self).objects.filter(
+                status='ENROLLED',
+                is_active=True,
+                external_biometric_id=self.external_biometric_id,
+            ).exclude(pk=self.pk)
+            if duplicate_external.exists():
+                raise ValidationError({
+                    'external_biometric_id':
+                        'This biometric ID is already actively enrolled to another person.',
+                })
+
+            duplicate_person = type(self).objects.filter(
+                status='ENROLLED',
+                is_active=True,
+                person=self.person,
+            ).exclude(pk=self.pk)
+            if duplicate_person.exists():
+                raise ValidationError({
+                    'person': 'This person already has an active biometric enrollment.',
+                })
+
+    def save(self, *args, **kwargs):
+        # Database generated-column unique indexes provide the final defense.
+        return super().save(*args, **kwargs)
+
+    def __str__(self):
+        return f"{self.person.name}: {self.external_biometric_id} ({self.status})"
 
 
 class AttendanceRecord(BaseModel):

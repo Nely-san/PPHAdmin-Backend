@@ -1,5 +1,6 @@
 import requests
 from django.conf import settings
+from django.db import transaction, IntegrityError
 from django.db.models import Case, When, Value, IntegerField
 from django.utils import timezone
 try:
@@ -9,6 +10,7 @@ except ImportError:
     id_token = None
     google_requests = None
 from rest_framework import viewsets, permissions, status
+from rest_framework import serializers as drf_serializers
 from rest_framework.views import APIView
 from rest_framework.decorators import action, api_view, permission_classes
 from rest_framework.response import Response
@@ -20,10 +22,20 @@ from django.utils.http import urlsafe_base64_encode, urlsafe_base64_decode
 from django.utils.encoding import force_bytes, force_str
 from django.core.mail import send_mail
 
-from users.models import User, Person, Role, PagePermission, Notification, NotificationPreference
+from users.models import (
+    User,
+    Person,
+    PersonProfile,
+    CharacterReference,
+    Role,
+    PagePermission,
+    Notification,
+    NotificationPreference,
+)
 from users.serializers import (
     UserProfileSerializer,
     PersonDetailSerializer,
+    PersonProfileSelfServiceSerializer,
     CustomTokenObtainPairSerializer,
     RegisterSerializer,
     AccountApprovalSerializer,
@@ -31,6 +43,8 @@ from users.serializers import (
     NotificationPreferenceSerializer
 )
 from users.throttles import AuthLoginThrottle, PasswordResetThrottle
+from biometrics_attendance.models import BiometricEnrollment
+from audit.signals import record_audit_log
 
 ROLE_ORDER_MAP = {
     'SUPER_ADMIN': 1,
@@ -326,6 +340,12 @@ class HasEmployeePermission(permissions.BasePermission):
         custom_codes = set(request.user.custom_permissions.values_list('code', flat=True))
         all_codes = role_codes | custom_codes
 
+        action_name = getattr(view, 'action', '')
+        if action_name == 'link_biometric':
+            return 'employees:edit' in all_codes or 'personnel:edit' in all_codes
+        if action_name == 'unlink_biometric':
+            return 'employees:delete' in all_codes or 'personnel:delete' in all_codes
+
         # Check if user has access to employees or personnel module
         has_employee_module = any(
             code in all_codes or any(c.startswith(f"{code}:") for c in all_codes)
@@ -402,6 +422,171 @@ class PersonViewSet(viewsets.ModelViewSet):
         person = self.get_object()
         person.restore()
         return Response(PersonDetailSerializer(person).data)
+
+    @action(detail=True, methods=['post'], url_path='link-biometric')
+    def link_biometric(self, request, pk=None):
+        raw_external_id = (
+            request.data.get('external_biometric_id')
+            or request.data.get('externalBiometricId')
+            or request.data.get('biometricId')
+            or request.data.get('biometric_id')
+        )
+        external_id = str(raw_external_id).strip() if raw_external_id is not None else ''
+
+        if not external_id:
+            return Response(
+                {'detail': 'external_biometric_id is required.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        if len(external_id) > 50:
+            return Response(
+                {'detail': 'external_biometric_id must be 50 characters or fewer.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        try:
+            with transaction.atomic():
+                person = Person.objects.select_for_update().get(pk=pk)
+                active = (
+                    BiometricEnrollment.objects
+                    .select_for_update()
+                    .filter(
+                        person=person,
+                        status='ENROLLED',
+                        is_active=True,
+                    )
+                    .first()
+                )
+                old_external_id = person.biometric_id
+
+                duplicate_external = (
+                    BiometricEnrollment.objects
+                    .select_for_update()
+                    .filter(
+                        status='ENROLLED',
+                        is_active=True,
+                        external_biometric_id=external_id,
+                    )
+                    .exclude(person=person)
+                    .exists()
+                )
+                if duplicate_external:
+                    return Response(
+                        {'detail': 'This biometric ID is already actively enrolled to another person.'},
+                        status=status.HTTP_400_BAD_REQUEST,
+                    )
+
+                if active:
+                    if active.external_biometric_id != external_id:
+                        return Response(
+                            {'detail': 'This person already has an active biometric enrollment.'},
+                            status=status.HTTP_400_BAD_REQUEST,
+                        )
+                    active.status = 'REVOKED'
+                    active.is_active = False
+                    active.save(update_fields=['status', 'is_active', 'updated_at'])
+
+                enrollment = BiometricEnrollment.objects.create(
+                    person=person,
+                    external_biometric_id=external_id,
+                    device_name='',
+                    device_id='',
+                    status='ENROLLED',
+                    is_active=True,
+                    enrolled_by=request.user,
+                )
+                person.biometric_id = external_id
+                person.save(update_fields=['biometric_id', 'updated_at'])
+        except Person.DoesNotExist:
+            return Response(
+                {'detail': 'Person not found.'},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+        except IntegrityError:
+            return Response(
+                {'detail': 'This biometric ID is already actively enrolled to another person.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        try:
+            record_audit_log(
+                table_name='persons',
+                record_id=str(person.pk),
+                action='LINK_BIOMETRIC',
+                old_data={'biometric_id': old_external_id},
+                new_data={'biometric_id': external_id},
+                changed_by=request.user.username,
+            )
+        except Exception:
+            pass
+
+        return Response(
+            {
+                'id': str(enrollment.pk),
+                'person_id': str(person.pk),
+                'external_biometric_id': external_id,
+                'status': 'ENROLLED',
+                'is_active': True,
+            },
+            status=status.HTTP_200_OK,
+        )
+
+    @action(detail=True, methods=['post'], url_path='unlink-biometric')
+    def unlink_biometric(self, request, pk=None):
+        try:
+            with transaction.atomic():
+                person = Person.objects.select_for_update().get(pk=pk)
+                active = (
+                    BiometricEnrollment.objects
+                    .select_for_update()
+                    .filter(
+                        person=person,
+                        status='ENROLLED',
+                        is_active=True,
+                    )
+                    .first()
+                )
+                if active is None:
+                    return Response(
+                        {'detail': 'No active biometric enrollment found.'},
+                        status=status.HTTP_404_NOT_FOUND,
+                    )
+
+                old_external_id = active.external_biometric_id
+                active.status = 'REVOKED'
+                active.is_active = False
+                active.save(update_fields=['status', 'is_active', 'updated_at'])
+
+                if person.biometric_id == old_external_id:
+                    person.biometric_id = None
+                    person.save(update_fields=['biometric_id', 'updated_at'])
+        except Person.DoesNotExist:
+            return Response(
+                {'detail': 'Person not found.'},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+
+        try:
+            record_audit_log(
+                table_name='persons',
+                record_id=str(person.pk),
+                action='UNLINK_BIOMETRIC',
+                old_data={'biometric_id': old_external_id},
+                new_data={'biometric_id': None},
+                changed_by=request.user.username,
+            )
+        except Exception:
+            pass
+
+        return Response(
+            {
+                'person_id': str(person.pk),
+                'external_biometric_id': old_external_id,
+                'status': 'REVOKED',
+                'is_active': False,
+            },
+            status=status.HTTP_200_OK,
+        )
 
     @action(detail=True, methods=['patch', 'put'], url_path='ojt-hours')
     def update_ojt_hours(self, request, pk=None):
@@ -544,14 +729,108 @@ def register_view(request):
     )
 
 
-@api_view(['GET'])
+@api_view(['GET', 'PATCH'])
 @permission_classes([permissions.IsAuthenticated])
 def current_user_view(request):
     """
     Returns authenticated user profile, dynamic role, and allowed pages.
     """
-    serializer = UserProfileSerializer(request.user)
-    return Response(serializer.data)
+    if request.method == 'PATCH':
+        try:
+            with transaction.atomic():
+                person = Person.objects.select_for_update().filter(user=request.user).first()
+                if person is None:
+                    return Response(
+                        {'detail': 'No Person record is linked to this user.'},
+                        status=status.HTTP_400_BAD_REQUEST,
+                    )
+                profile, _ = PersonProfile.objects.select_for_update().get_or_create(
+                    person=person
+                )
+
+                profile_fields = [
+                    field.name for field in PersonProfile._meta.fields
+                    if field.name in PersonProfileSelfServiceSerializer().fields
+                ]
+                old_data = {
+                    field: getattr(profile, field)
+                    for field in profile_fields
+                }
+                old_data['character_references'] = [
+                    {
+                        'id': str(reference.id),
+                        'name': reference.name,
+                        'relationship': reference.relationship,
+                        'contact_number': reference.contact_number,
+                        'email_address': reference.email_address,
+                        'position_or_company': reference.position_or_company,
+                        'display_order': reference.display_order,
+                    }
+                    for reference in profile.character_references.filter(is_archived=False)
+                ]
+
+                profile_serializer = PersonProfileSelfServiceSerializer(
+                    profile,
+                    data=request.data,
+                    partial=True,
+                )
+                profile_serializer.is_valid(raise_exception=True)
+                updated_profile = profile_serializer.save()
+
+                new_data = {
+                    field: getattr(updated_profile, field)
+                    for field in profile_fields
+                }
+                new_data['character_references'] = [
+                    {
+                        'id': str(reference.id),
+                        'name': reference.name,
+                        'relationship': reference.relationship,
+                        'contact_number': reference.contact_number,
+                        'email_address': reference.email_address,
+                        'position_or_company': reference.position_or_company,
+                        'display_order': reference.display_order,
+                    }
+                    for reference in updated_profile.character_references.filter(is_archived=False)
+                ]
+
+                changed_fields = {
+                    key: {'old': old_data[key], 'new': new_data[key]}
+                    for key in new_data
+                    if old_data.get(key) != new_data[key]
+                }
+                if changed_fields:
+                    try:
+                        record_audit_log(
+                            table_name='person_profiles',
+                            record_id=str(updated_profile.pk),
+                            action='PROFILE_UPDATE',
+                            old_data=old_data,
+                            new_data=new_data,
+                            changed_by=request.user.username,
+                        )
+                    except Exception:
+                        pass
+        except drf_serializers.ValidationError as exc:
+            return Response(exc.detail, status=status.HTTP_400_BAD_REQUEST)
+        except IntegrityError as exc:
+            return Response(
+                {'detail': 'Profile update could not be saved because of invalid reference data.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        response_data = UserProfileSerializer(request.user).data
+        response_data['profile'] = PersonProfileSelfServiceSerializer(updated_profile).data
+        return Response(response_data)
+
+    person = getattr(request.user, 'person', None)
+    response_data = UserProfileSerializer(request.user).data
+    if person is not None:
+        profile, _ = PersonProfile.objects.get_or_create(person=person)
+        response_data['profile'] = PersonProfileSelfServiceSerializer(profile).data
+    else:
+        response_data['profile'] = None
+    return Response(response_data)
 
 
 @api_view(['POST'])
@@ -850,7 +1129,3 @@ def attendance_reset_view(request):
         'status': 'success',
         'message': f'Attendance records reset cleanly. {count} temporary imported record(s) purged.'
     }, status=status.HTTP_200_OK)
-
-
-
-
