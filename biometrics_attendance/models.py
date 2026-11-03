@@ -183,6 +183,30 @@ class AttendanceRecord(BaseModel):
         unique_together = ('person', 'date')
         ordering = ['-date', 'person']
 
+    def clean(self):
+        super().clean()
+        if self.pk:
+            if AttendanceRecord.objects.filter(pk=self.pk, is_locked=True).exists():
+                raise ValidationError("Attendance record is locked and cannot be modified.")
+        elif self.person_id and self.date:
+            if AttendanceRecord.objects.filter(person_id=self.person_id, date=self.date, is_locked=True).exists():
+                raise ValidationError("Attendance record is locked and cannot be modified.")
+
+    def save(self, *args, **kwargs):
+        if self.pk:
+            if AttendanceRecord.objects.filter(pk=self.pk, is_locked=True).exists():
+                raise ValidationError("Attendance record is locked and cannot be modified.")
+        elif self.person_id and self.date:
+            if AttendanceRecord.objects.filter(person_id=self.person_id, date=self.date, is_locked=True).exists():
+                raise ValidationError("Attendance record is locked and cannot be modified.")
+        self.clean()
+        return super().save(*args, **kwargs)
+
+    def delete(self, *args, **kwargs):
+        if self.is_locked or AttendanceRecord.objects.filter(pk=self.pk, is_locked=True).exists():
+            raise ValidationError("Attendance record is locked and cannot be deleted.")
+        return super().delete(*args, **kwargs)
+
     def __str__(self):
         return f"{self.person.name} on {self.date} - {self.status} ({self.actual_hours} hrs)"
 

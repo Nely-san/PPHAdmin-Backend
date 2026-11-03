@@ -40,11 +40,17 @@ class BiometricImportViewSet(viewsets.ReadOnlyModelViewSet):
                 status=status.HTTP_400_BAD_REQUEST
             )
 
-        result = process_biometric_import(
-            file_obj=file_obj,
-            file_name=file_obj.name,
-            user_identifier=request.user.username
-        )
+        try:
+            result = process_biometric_import(
+                file_obj=file_obj,
+                file_name=file_obj.name,
+                user_identifier=request.user.username
+            )
+        except Exception as e:
+            return Response(
+                {"detail": f"Failed to parse biometric file: {str(e)}", "success": False},
+                status=status.HTTP_400_BAD_REQUEST
+            )
 
         if not result['success']:
             return Response(result, status=status.HTTP_400_BAD_REQUEST)
@@ -114,6 +120,33 @@ class AttendanceRecordViewSet(viewsets.ModelViewSet):
         serializer = self.get_serializer(qs, many=True)
         return Response(serializer.data)
 
+    def update(self, request, *args, **kwargs):
+        instance = self.get_object()
+        if instance.is_locked:
+            return Response(
+                {"detail": "Attendance record is locked and cannot be modified."},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        return super().update(request, *args, **kwargs)
+
+    def partial_update(self, request, *args, **kwargs):
+        instance = self.get_object()
+        if instance.is_locked:
+            return Response(
+                {"detail": "Attendance record is locked and cannot be modified."},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        return super().partial_update(request, *args, **kwargs)
+
+    def destroy(self, request, *args, **kwargs):
+        instance = self.get_object()
+        if instance.is_locked:
+            return Response(
+                {"detail": "Attendance record is locked and cannot be deleted."},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        return super().destroy(request, *args, **kwargs)
+
     @action(detail=False, methods=['post'], url_path='field-log')
     def field_log(self, request):
         """
@@ -128,6 +161,11 @@ class AttendanceRecordViewSet(viewsets.ModelViewSet):
             return Response({"detail": "Personnel record not found."}, status=status.HTTP_404_NOT_FOUND)
 
         log_date = data['date']
+        if AttendanceRecord.objects.filter(person=person, date=log_date, is_locked=True).exists():
+            return Response(
+                {"detail": "Cannot submit field log for a locked attendance date."},
+                status=status.HTTP_400_BAD_REQUEST
+            )
         am_in_t = data.get('am_in') or time(9, 0)
         pm_out_t = data.get('pm_out') or time(18, 0)
         dt_am_in = datetime.combine(log_date, am_in_t)

@@ -12,16 +12,11 @@ def round_curr(val):
 
 def calculate_sss(monthly_salary):
     """
-    Standard SSS Philippine Employee Contribution calculation (approx 4.5% employee share capped at ~1,350 PHP).
-    Semi-monthly cutoff uses half the deduction.
+    Standard SSS Philippine Employee Contribution (5% employee share capped at PHP 1,750.00/month).
+    Semi-monthly cutoff uses half the deduction (/2 -> max PHP 875.00/cutoff).
     """
     ms = Decimal(str(monthly_salary))
-    if ms < Decimal('4250'):
-        monthly_ee = Decimal('180.00')
-    elif ms >= Decimal('29750'):
-        monthly_ee = Decimal('1350.00')
-    else:
-        monthly_ee = ms * Decimal('0.045')
+    monthly_ee = min(ms * Decimal('0.05'), Decimal('1750.00'))
     return round_curr(monthly_ee / Decimal('2'))
 
 def calculate_philhealth(monthly_salary):
@@ -36,12 +31,39 @@ def calculate_philhealth(monthly_salary):
 
 def calculate_pagibig(monthly_salary):
     """
-    Standard Pag-IBIG Mandatory Contribution (PHP 100 or PHP 200 / month = PHP 100 / cutoff).
+    Pag-IBIG Mandatory Contribution (2% capped at PHP 10,000 max fund salary = max PHP 200/month).
+    Semi-monthly cutoff uses half (/2 -> PHP 50.00 to PHP 100.00/cutoff).
     """
     ms = Decimal(str(monthly_salary))
-    if ms > Decimal('1500'):
-        return Decimal('100.00')
-    return Decimal('50.00')
+    fund_salary = min(ms, Decimal('10000.00'))
+    rate = Decimal('0.01') if ms <= Decimal('1500.00') else Decimal('0.02')
+    monthly_ee = fund_salary * rate
+    return round_curr(monthly_ee / Decimal('2'))
+
+def calculate_withholding_tax(semi_monthly_taxable):
+    """
+    Philippine Semi-Monthly BIR Withholding Tax under TRAIN Law (revised official table).
+    Semi-monthly taxable compensation brackets:
+      Bracket 1: <= 10,417.00: 0.00
+      Bracket 2: 10,417.01 - 16,666.00: 15% over 10,417.00
+      Bracket 3: 16,667.01 - 33,333.00: 937.50 + 20% over 16,667.00
+      Bracket 4: 33,334.01 - 83,333.00: 4,270.70 + 25% over 33,333.00
+      Bracket 5: 83,334.01 - 333,333.00: 16,770.70 + 30% over 83,333.00
+      Bracket 6: > 333,333.00: 91,770.70 + 35% over 333,333.00
+    """
+    st = Decimal(str(semi_monthly_taxable))
+    if st <= Decimal('10417.00'):
+        return Decimal('0.00')
+    elif st <= Decimal('16666.00'):
+        return round_curr((st - Decimal('10417.00')) * Decimal('0.15'))
+    elif st <= Decimal('33333.00'):
+        return round_curr(Decimal('937.50') + (st - Decimal('16667.00')) * Decimal('0.20'))
+    elif st <= Decimal('83333.00'):
+        return round_curr(Decimal('4270.70') + (st - Decimal('33333.00')) * Decimal('0.25'))
+    elif st <= Decimal('333333.00'):
+        return round_curr(Decimal('16770.70') + (st - Decimal('83333.00')) * Decimal('0.30'))
+    else:
+        return round_curr(Decimal('91770.70') + (st - Decimal('333333.00')) * Decimal('0.35'))
 
 
 def calculate_person_cutoff_payroll(
@@ -131,6 +153,7 @@ def calculate_person_cutoff_payroll(
     sss_deduction = Decimal('0.00')
     philhealth_deduction = Decimal('0.00')
     pagibig_deduction = Decimal('0.00')
+    withholding_tax = Decimal('0.00')
 
     person_has_gov = getattr(person, 'has_government_deductions', True)
     if include_government_deductions and person_has_gov and person.person_type == 'EMPLOYEE' and gross_pay > 0:
@@ -141,8 +164,18 @@ def calculate_person_cutoff_payroll(
         if include_pagibig:
             pagibig_deduction = calculate_pagibig(monthly_equivalent)
 
-    total_deductions = tardiness_deduction + sss_deduction + philhealth_deduction + pagibig_deduction
-    net_pay = max(Decimal('0.00'), gross_pay - total_deductions)
+        # Sequencing: Gross -> Contributions -> Taxable Base -> Withholding Tax
+        taxable_base = max(Decimal('0.00'), gross_pay - (sss_deduction + philhealth_deduction + pagibig_deduction + tardiness_deduction))
+        withholding_tax = calculate_withholding_tax(taxable_base)
+
+    total_deductions = tardiness_deduction + sss_deduction + philhealth_deduction + pagibig_deduction + withholding_tax
+    shortfall = total_deductions - gross_pay
+    if shortfall > Decimal('0.00'):
+        net_pay = Decimal('0.00')
+        arrear_balance = shortfall
+    else:
+        net_pay = gross_pay - total_deductions
+        arrear_balance = Decimal('0.00')
 
     # Items Breakdown list
     items = []
@@ -187,6 +220,13 @@ def calculate_person_cutoff_payroll(
             'amount': pagibig_deduction
         })
 
+    if withholding_tax > 0:
+        items.append({
+            'item_type': 'DEDUCTION',
+            'description': 'BIR Withholding Tax (TRAIN Semi-Monthly)',
+            'amount': withholding_tax
+        })
+
     return {
         'person': person,
         'cutoff_start': cutoff_start,
@@ -194,6 +234,8 @@ def calculate_person_cutoff_payroll(
         'gross_pay': gross_pay,
         'total_deductions': total_deductions,
         'net_pay': net_pay,
+        'arrear_balance': arrear_balance,
+        'withholding_tax': withholding_tax,
         'total_actual_hours': total_actual_hours,
         'days_present': days_present,
         'items': items
@@ -243,6 +285,7 @@ def run_cutoff_payroll_batch(
                     'gross_pay': calc['gross_pay'],
                     'total_deductions': calc['total_deductions'],
                     'net_pay': calc['net_pay'],
+                    'arrear_balance': calc['arrear_balance'],
                     'status': 'DRAFT',
                     'is_archived': False
                 }

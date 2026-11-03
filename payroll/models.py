@@ -19,6 +19,7 @@ class PayrollRecord(BaseModel):
     gross_pay = models.DecimalField(max_digits=12, decimal_places=2, default=0.00)
     total_deductions = models.DecimalField(max_digits=12, decimal_places=2, default=0.00)
     net_pay = models.DecimalField(max_digits=12, decimal_places=2, default=0.00)
+    arrear_balance = models.DecimalField(max_digits=12, decimal_places=2, default=0.00)
     status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='DRAFT', db_index=True)
 
     class Meta:

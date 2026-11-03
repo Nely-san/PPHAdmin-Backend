@@ -15,6 +15,12 @@ def sync_approved_leave_to_attendance(sender, instance, created, **kwargs):
     if instance.status == 'APPROVED':
         cur_date = instance.start_date
         while cur_date <= instance.end_date:
+            # Skip sync if attendance for this date is locked
+            existing_att = AttendanceRecord.objects.filter(person=instance.person, date=cur_date).first()
+            if existing_att and existing_att.is_locked:
+                cur_date += timedelta(days=1)
+                continue
+
             is_ob = instance.request_type == 'OFFICIAL_BUSINESS'
             status_code = 'BUSINESS_TRIP' if is_ob else 'ON_LEAVE'
             hours = Decimal('8.00') if is_ob else Decimal('0.00')

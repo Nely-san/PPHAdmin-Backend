@@ -122,6 +122,35 @@ class BiometricsAttendanceTests(APITestCase):
         self.assertEqual(enrollment.device_id, '')
         self.assertEqual(enrollment.device_name, 'Biometric import')
 
+    def test_biometric_import_skips_locked_attendance_records(self):
+        # Create an existing locked record for 2026-03-02
+        locked_rec = AttendanceRecord.objects.create(
+            person=self.person,
+            date=date(2026, 3, 2),
+            actual_hours=Decimal('7.50'),
+            is_locked=True
+        )
+
+        csv_content = (
+            "biometric_id,name,date,am_in,am_out,pm_in,pm_out\n"
+            "101,John Biometrics,2026-03-02,08:58,12:00,13:00,18:00\n"
+        ).encode('utf-8')
+        uploaded = SimpleUploadedFile("attendance_test.csv", csv_content, content_type="text/csv")
+        res = self.client.post('/api/biometrics/upload/', {'file': uploaded}, format='multipart')
+
+        self.assertEqual(res.status_code, status.HTTP_200_OK)
+        locked_rec.refresh_from_db()
+        # Verify hours were not overwritten from 7.50 to 8.00
+        self.assertEqual(locked_rec.actual_hours, Decimal('7.50'))
+
+    def test_biometric_import_malformed_xls_returns_400_not_500(self):
+        # Corrupted / binary garbage file pretending to be .xls
+        garbage_content = b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1GARBAGE_HEADER_DATA_NOT_A_VALID_EXCEL"
+        uploaded = SimpleUploadedFile("corrupted.xls", garbage_content, content_type="application/vnd.ms-excel")
+        res = self.client.post('/api/biometrics/upload/', {'file': uploaded}, format='multipart')
+        self.assertEqual(res.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertFalse(res.data.get('success', False))
+
     def test_import_revoked_id_does_not_match_person(self):
         revoked_owner = Person.objects.create(
             name='Revoked Owner',

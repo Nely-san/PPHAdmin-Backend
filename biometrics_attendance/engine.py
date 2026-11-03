@@ -107,11 +107,15 @@ def extract_rows_from_file(file_obj, file_name):
             book = xlrd.open_workbook(file_contents=content)
             sheet = book.sheet_by_index(0)
             if sheet.nrows > 0:
-                headers = [str(sheet.cell_value(0, c)).strip().lower() for c in range(sheet.ncols)]
+                raw_headers = [str(sheet.cell_value(0, c)).strip().lower() for c in range(sheet.ncols)]
+                # Pre-flight header validation: check for expected columns
+                expected_keys = {'biometric_id', 'id', 'pin', 'person_id', 'date', 'am_in', 'pm_out', 'time', 'name'}
+                if not any(h in expected_keys or any(k in h for k in expected_keys) for h in raw_headers if h):
+                    return []
                 for r in range(1, sheet.nrows):
                     row_dict = {}
                     for c in range(sheet.ncols):
-                        h = headers[c]
+                        h = raw_headers[c]
                         if h:
                             row_dict[h] = sheet.cell_value(r, c)
                     if any(row_dict.values()):
@@ -449,6 +453,8 @@ def process_biometric_import(file_obj, file_name, user_identifier='SYSTEM'):
             shift = schedule.shift if schedule and schedule.shift else default_shift
 
             existing_record = AttendanceRecord.objects.filter(person=person, date=rec_date).first()
+            if existing_record and existing_record.is_locked:
+                continue
             old_hours = existing_record.actual_hours if existing_record else Decimal('0.00')
 
             computed = compute_daily_attendance(

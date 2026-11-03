@@ -102,6 +102,19 @@ class LeaveOBViewSet(viewsets.ModelViewSet):
         action_type = serializer.validated_data['action']
         remarks = serializer.validated_data.get('remarks', '')
 
+        if action_type == 'APPROVED':
+            from biometrics_attendance.models import AttendanceRecord
+            if AttendanceRecord.objects.filter(
+                person=application.person,
+                date__gte=application.start_date,
+                date__lte=application.end_date,
+                is_locked=True
+            ).exists():
+                return Response(
+                    {"detail": "Cannot approve application: the date range contains locked attendance records."},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+
         application.status = action_type
         application.reviewed_by = request.user
         application.review_remarks = remarks
