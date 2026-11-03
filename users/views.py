@@ -20,6 +20,7 @@ from rest_framework_simplejwt.tokens import RefreshToken
 from django.contrib.auth.tokens import default_token_generator
 from django.utils.http import urlsafe_base64_encode, urlsafe_base64_decode
 from django.utils.encoding import force_bytes, force_str
+from django.utils.dateparse import parse_date
 from django.core.mail import send_mail
 
 from users.models import (
@@ -35,6 +36,7 @@ from users.models import (
 from users.serializers import (
     UserProfileSerializer,
     PersonDetailSerializer,
+    PersonDetailAdminWriteSerializer,
     PersonProfileSelfServiceSerializer,
     CustomTokenObtainPairSerializer,
     RegisterSerializer,
@@ -368,6 +370,10 @@ class HasEmployeePermission(permissions.BasePermission):
             return 'employees' in all_codes or 'personnel' in all_codes
 
         if request.method in ['PUT', 'PATCH']:
+            if 'profile' in request.data:
+                if 'employees:profiles:edit' in all_codes:
+                    return True
+                return False
             if 'employees:edit' in all_codes or 'personnel:edit' in all_codes:
                 return True
             return 'employees' in all_codes or 'personnel' in all_codes
@@ -388,6 +394,39 @@ class PersonViewSet(viewsets.ModelViewSet):
     serializer_class = PersonDetailSerializer
     permission_classes = [permissions.IsAuthenticated, HasEmployeePermission]
     pagination_class = None
+
+    def get_serializer_class(self):
+        if getattr(self, 'action', None) in ['update', 'partial_update']:
+            return PersonDetailAdminWriteSerializer
+        return PersonDetailSerializer
+
+    def perform_update(self, serializer):
+        with transaction.atomic():
+            return super().perform_update(serializer)
+
+    def perform_create(self, serializer):
+        with transaction.atomic():
+            person = serializer.save()
+
+            raw_profile = self.request.data.get('profile') if hasattr(self.request, 'data') else None
+            if isinstance(raw_profile, dict):
+                registration_value = (
+                    raw_profile.get('registration_date')
+                    or raw_profile.get('registrationDate')
+                )
+            else:
+                registration_value = None
+
+            onboarding_date = parse_date(str(registration_value)) if registration_value else None
+            if onboarding_date is None:
+                onboarding_date = timezone.localdate()
+
+            person.date_started = onboarding_date
+            person.save(update_fields=['date_started'])
+            profile, _ = PersonProfile.objects.get_or_create(person=person)
+            profile.registration_date = onboarding_date
+            profile.save(update_fields=['registration_date'])
+            return person
 
     def get_queryset(self):
         from django.db.models import Q
@@ -734,6 +773,9 @@ def register_view(request):
 def current_user_view(request):
     """
     Returns authenticated user profile, dynamic role, and allowed pages.
+
+    Self-service profile edit is intentional: `IsAuthenticated` + linked-Person ownership.
+    Admin/HR edit of other employees is gated by `employees:profiles:edit` on `PersonViewSet`.
     """
     if request.method == 'PATCH':
         try:

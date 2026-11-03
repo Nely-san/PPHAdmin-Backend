@@ -111,6 +111,99 @@ class PersonProfileSelfServiceSerializer(serializers.ModelSerializer):
         return instance
 
 
+class CharacterReferenceReadOnlySerializer(serializers.ModelSerializer):
+    class Meta:
+        model = CharacterReference
+        fields = [
+            'id',
+            'name',
+            'relationship',
+            'contact_number',
+            'email_address',
+            'position_or_company',
+            'display_order',
+        ]
+        read_only_fields = fields
+
+
+class PersonProfileReadOnlySerializer(serializers.ModelSerializer):
+    character_references = CharacterReferenceReadOnlySerializer(many=True, read_only=True)
+
+    class Meta:
+        model = PersonProfile
+        fields = [
+            'partners_code',
+            'birth_date',
+            'birth_place',
+            'citizenship',
+            'gender',
+            'civil_status',
+            'tin_number',
+            'registration_date',
+            'house_number',
+            'street',
+            'barangay',
+            'city_municipality',
+            'province_region',
+            'zip_code',
+            'landline',
+            'mobile_number',
+            'highest_education_attainment',
+            'course',
+            'education_school',
+            'year_graduated',
+            'property_status',
+            'accreditation_date',
+            'current_position',
+            'previous_position',
+            'position_time_period',
+            'prc_license_number',
+            'prc_license_time_period',
+            'hlurb_license_number',
+            'hlurb_license_time_period',
+            'partners_recruiter',
+            'executive_partner',
+            'team_director',
+            'division_broker',
+            'character_references',
+        ]
+        read_only_fields = fields
+
+
+class PersonProfileAdminWriteSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = PersonProfile
+        fields = [
+            'partners_code',
+            'birth_date',
+            'birth_place',
+            'citizenship',
+            'gender',
+            'civil_status',
+            'tin_number',
+            'registration_date',
+            'property_status',
+            'accreditation_date',
+            'current_position',
+            'previous_position',
+            'position_time_period',
+            'prc_license_number',
+            'prc_license_time_period',
+            'hlurb_license_number',
+            'hlurb_license_time_period',
+            'partners_recruiter',
+            'executive_partner',
+            'team_director',
+            'division_broker',
+        ]
+        extra_kwargs = {field: {
+            'required': False,
+            'allow_null': True,
+        } for field in fields}
+
+
+
+
 class PersonDetailSerializer(serializers.ModelSerializer):
     user_id = serializers.CharField(source='user.id', read_only=True, default=None)
     username = serializers.CharField(source='user.username', read_only=True, default=None)
@@ -118,6 +211,7 @@ class PersonDetailSerializer(serializers.ModelSerializer):
     is_active = serializers.BooleanField(source='user.is_active', read_only=True, default=None)
 
     biometric_id = serializers.CharField(read_only=True)
+    profile = PersonProfileReadOnlySerializer(source='profile_extension', read_only=True)
 
     class Meta:
         model = Person
@@ -127,7 +221,8 @@ class PersonDetailSerializer(serializers.ModelSerializer):
             'rate_type', 'base_rate', 'date_started', 'date_ended', 'status', 
             'school_name', 'coordinator_contact', 
             'required_ojt_hours', 'rendered_ojt_hours', 'is_newly_imported',
-            'work_setup', 'notes', 'shift_code', 'work_days', 'has_government_deductions'
+            'work_setup', 'notes', 'shift_code', 'work_days', 'has_government_deductions',
+            'profile'
         ]
 
     def to_representation(self, instance):
@@ -216,6 +311,34 @@ class PersonDetailSerializer(serializers.ModelSerializer):
                     if user and (not getattr(user, 'person', None) or user.person == instance):
                         instance.user = user
         return super().update(instance, validated_data)
+
+
+class PersonDetailAdminWriteSerializer(PersonDetailSerializer):
+    profile = PersonProfileAdminWriteSerializer(source='profile_extension', required=False)
+    date_started = serializers.DateField(read_only=True)
+
+    def to_internal_value(self, data):
+        profile_data = data.get('profile')
+        if isinstance(profile_data, dict):
+            allowed_fields = set(PersonProfileAdminWriteSerializer.Meta.fields)
+            unsupported_fields = set(profile_data.keys()) - allowed_fields
+            if unsupported_fields:
+                raise serializers.ValidationError({
+                    'profile': [
+                        f"Unsupported or self-service-owned fields: {', '.join(sorted(unsupported_fields))}"
+                    ]
+                })
+        return super().to_internal_value(data)
+
+    def update(self, instance, validated_data):
+        profile_data = validated_data.pop('profile_extension', None)
+        instance = super().update(instance, validated_data)
+        if profile_data is not None:
+            profile, _ = PersonProfile.objects.get_or_create(person=instance)
+            for field, value in profile_data.items():
+                setattr(profile, field, value)
+            profile.save(update_fields=list(profile_data.keys()))
+        return instance
 
 
 

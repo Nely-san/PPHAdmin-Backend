@@ -114,6 +114,247 @@ class CurrentUserPrivacyTests(TestCase):
         self.assertEqual(response.data['biometric_id'], 'BIO-ADMIN-123')
         self.assertEqual(response.data['biometricId'], 'BIO-ADMIN-123')
 
+    def test_admin_person_profile_is_read_only(self):
+        admin = User.objects.create_superuser(
+            username='profile_read_admin',
+            password='Password123!',
+        )
+        employee = User.objects.create_user(
+            username='profile_read_employee',
+            password='Password123!',
+            role=self.employee_role,
+        )
+        person = Person.objects.filter(user=employee).first()
+        if person is None:
+            person = Person.objects.create(
+                user=employee,
+                name='Profile Read Employee',
+                status='ACTIVE',
+            )
+        profile = person.profile_extension
+        profile.mobile_number = '09179999999'
+        profile.highest_education_attainment = 'College'
+        profile.save(update_fields=['mobile_number', 'highest_education_attainment'])
+        CharacterReference.objects.create(
+            person_profile=profile,
+            name='Read Only Reference',
+            relationship='Colleague',
+            contact_number='09178888888',
+            email_address='reference@example.com',
+            position_or_company='Example Company',
+        )
+
+        self.client.force_authenticate(admin)
+        response = self.client.get(f'/api/persons/{person.id}/')
+
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data['profile']['mobile_number'], '09179999999')
+        self.assertEqual(
+            response.data['profile']['highest_education_attainment'],
+            'College',
+        )
+        self.assertEqual(
+            response.data['profile']['character_references'][0]['name'],
+            'Read Only Reference',
+        )
+
+        profile.mobile_number = '09179999999'
+        profile.save(update_fields=['mobile_number'])
+        patch_response = self.client.patch(f'/api/persons/{person.id}/', {
+            'profile': {
+                'mobile_number': '09170000000',
+                'highest_education_attainment': 'Changed',
+            },
+        }, format='json')
+
+        self.assertIn(
+            patch_response.status_code,
+            (status.HTTP_200_OK, status.HTTP_400_BAD_REQUEST),
+        )
+        profile.refresh_from_db()
+        self.assertEqual(profile.mobile_number, '09179999999')
+        self.assertEqual(profile.highest_education_attainment, 'College')
+
+
+class AdminPersonProfileWriteTests(TestCase):
+    def setUp(self):
+        cache.clear()
+        self.client = APIClient()
+        self.employee_role, _ = Role.objects.get_or_create(
+            code='EMPLOYEE',
+            defaults={'name': 'Employee'},
+        )
+        self.profiles_edit_permission, _ = PagePermission.objects.get_or_create(
+            code='employees:profiles:edit',
+            defaults={'name': 'Employees Profiles Edit', 'module': 'HR'},
+        )
+        self.employee_edit_permission, _ = PagePermission.objects.get_or_create(
+            code='employees:edit',
+            defaults={'name': 'Employees Edit', 'module': 'HR'},
+        )
+        self.employee_permission, _ = PagePermission.objects.get_or_create(
+            code='employees',
+            defaults={'name': 'Employees', 'module': 'HR'},
+        )
+        self.hr_role, _ = Role.objects.get_or_create(
+            code='HR_PROFILES_TEST',
+            defaults={'name': 'HR Profiles Test'},
+        )
+        self.hr_role.permissions.add(
+            self.employee_permission,
+            self.profiles_edit_permission,
+            self.employee_edit_permission,
+        )
+        self.hr_admin = User.objects.create_user(
+            username='profiles_hr_admin',
+            password='Password123!',
+            role=self.hr_role,
+        )
+        self.employee = User.objects.create_user(
+            username='profiles_write_employee',
+            password='Password123!',
+            role=self.employee_role,
+        )
+        self.person = Person.objects.filter(user=self.employee).first()
+        if self.person is None:
+            self.person = Person.objects.create(
+                user=self.employee,
+                name='Profiles Write Employee',
+                status='ACTIVE',
+            )
+        self.profile = self.person.profile_extension
+
+    def test_admin_with_profiles_edit_can_update_general_info(self):
+        self.client.force_authenticate(self.hr_admin)
+        response = self.client.patch(
+            f'/api/persons/{self.person.id}/',
+            {'profile': {'tin_number': '123-456-789'}},
+            format='json',
+        )
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.profile.refresh_from_db()
+        self.assertEqual(self.profile.tin_number, '123-456-789')
+
+    def test_admin_with_profiles_edit_can_update_property_info(self):
+        self.client.force_authenticate(self.hr_admin)
+        response = self.client.patch(
+            f'/api/persons/{self.person.id}/',
+            {'profile': {'property_status': 'Active', 'prc_license_number': 'PRC-12345'}},
+            format='json',
+        )
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.profile.refresh_from_db()
+        self.assertEqual(self.profile.property_status, 'Active')
+        self.assertEqual(self.profile.prc_license_number, 'PRC-12345')
+
+    def test_admin_without_profiles_edit_cannot_update_profile(self):
+        role, _ = Role.objects.get_or_create(
+            code='HR_NO_PROFILE_EDIT',
+            defaults={'name': 'HR No Profile Edit'},
+        )
+        employee_permission, _ = PagePermission.objects.get_or_create(
+            code='employees',
+            defaults={'name': 'Employees', 'module': 'HR'},
+        )
+        role.permissions.add(employee_permission)
+        user = User.objects.create_user(
+            username='profiles_no_edit_admin',
+            password='Password123!',
+            role=role,
+        )
+        self.client.force_authenticate(user)
+        response = self.client.patch(
+            f'/api/persons/{self.person.id}/',
+            {'profile': {'tin_number': 'NEW-TIN'}},
+            format='json',
+        )
+        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+        self.profile.refresh_from_db()
+        self.assertNotEqual(self.profile.tin_number, 'NEW-TIN')
+
+    def test_admin_write_cannot_touch_self_service_fields(self):
+        self.profile.mobile_number = '09170000000'
+        self.profile.save(update_fields=['mobile_number'])
+        self.client.force_authenticate(self.hr_admin)
+        response = self.client.patch(
+            f'/api/persons/{self.person.id}/',
+            {'profile': {
+                'mobile_number': '09179999999',
+                'character_references': [{'name': 'Rejected'}],
+            }},
+            format='json',
+        )
+        self.assertEqual(response.status_code, status.HTTP_400_BAD_REQUEST)
+        self.profile.refresh_from_db()
+        self.assertEqual(self.profile.mobile_number, '09170000000')
+        self.assertFalse(self.profile.character_references.exists())
+
+    def test_admin_write_creates_profile_if_missing(self):
+        self.profile.delete()
+        self.client.force_authenticate(self.hr_admin)
+        response = self.client.patch(
+            f'/api/persons/{self.person.id}/',
+            {'profile': {'tin_number': 'CREATED-TIN'}},
+            format='json',
+        )
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        profile = PersonProfile.objects.get(person=self.person)
+        self.assertEqual(profile.tin_number, 'CREATED-TIN')
+
+    def test_read_still_exposes_profile_read_only(self):
+        self.profile.mobile_number = '09170000000'
+        self.profile.save(update_fields=['mobile_number'])
+        self.client.force_authenticate(self.hr_admin)
+        response = self.client.get(f'/api/persons/{self.person.id}/')
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data['profile']['mobile_number'], '09170000000')
+        self.assertEqual(response.data['profile']['tin_number'], self.profile.tin_number)
+
+    def test_admin_cannot_update_date_started(self):
+        from datetime import date
+
+        self.person.date_started = date(2024, 1, 1)
+        self.person.save(update_fields=['date_started'])
+        self.client.force_authenticate(self.hr_admin)
+        response = self.client.patch(
+            f'/api/persons/{self.person.id}/',
+            {'date_started': '2020-01-01'},
+            format='json',
+        )
+        self.assertIn(
+            response.status_code,
+            (status.HTTP_200_OK, status.HTTP_400_BAD_REQUEST),
+        )
+        self.person.refresh_from_db()
+        self.assertEqual(str(self.person.date_started), '2024-01-01')
+
+    def test_read_still_exposes_date_started(self):
+        from datetime import date
+
+        self.person.date_started = date(2024, 1, 1)
+        self.person.save(update_fields=['date_started'])
+        self.client.force_authenticate(self.hr_admin)
+        response = self.client.get(f'/api/persons/{self.person.id}/')
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertEqual(response.data['date_started'], '2024-01-01')
+
+    def test_onboarding_initializes_date_started_and_registration_date(self):
+        self.client.force_authenticate(self.hr_admin)
+        response = self.client.post(
+            '/api/persons/',
+            {
+                'name': 'Onboarding Date Employee',
+                'dateStarted': '2025-03-15',
+                'profile': {'registration_date': '2025-03-15'},
+            },
+            format='json',
+        )
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        person = Person.objects.get(name='Onboarding Date Employee')
+        profile = PersonProfile.objects.get(person=person)
+        self.assertEqual(str(person.date_started), '2025-03-15')
+        self.assertEqual(str(profile.registration_date), '2025-03-15')
+
 
 class BiometricEndpointTests(TestCase):
     def setUp(self):
