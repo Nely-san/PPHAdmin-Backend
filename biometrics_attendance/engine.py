@@ -193,29 +193,77 @@ def parse_html_statistic(html_text):
 def normalize_raw_row(row_dict):
     bio_id = None
     name = None
-    for k in ('biometric_id', 'biometricid', 'enroll_id', 'enrollid', 'userid', 'user_id', 'id', 'pin', 'no.', 'no'):
-        if k in row_dict and row_dict[k]:
-            bio_id = str(row_dict[k]).replace('.0', '').strip()
+    normalized_row = {
+        re.sub(r'[^a-z0-9]', '', str(k).lower()):
+        v
+        for k, v in row_dict.items()
+    }
+
+    bio_aliases = (
+        'biometricid', 'enrollid', 'userid', 'personid', 'employeeid',
+        'staffid', 'id', 'pin', 'acno', 'no',
+    )
+    for k in bio_aliases:
+        if normalized_row.get(k):
+            bio_id = str(normalized_row[k]).strip()
+            if bio_id.endswith('.0'):
+                bio_id = bio_id[:-2]
+            bio_id = bio_id.strip()
             break
 
-    for k in ('name', 'person_name', 'employee_name', 'full_name', 'employee'):
-        if k in row_dict and row_dict[k]:
-            name = str(row_dict[k]).strip()
+    for k in ('name', 'personname', 'employeename', 'fullname', 'employee'):
+        if normalized_row.get(k):
+            name = str(normalized_row[k]).strip()
             break
 
     date_val = None
-    for k in ('date', 'work_date', 'workdate', 'attendance_date', 'att_date', 'day'):
-        if k in row_dict and row_dict[k]:
-            date_val = parse_date_str(row_dict[k])
+    for k in ('date', 'datetime', 'workdate', 'attendancedate', 'attdate', 'day'):
+        if normalized_row.get(k):
+            date_val = parse_date_str(normalized_row[k])
             if date_val:
                 break
 
-    am_in = parse_time_str(row_dict.get('am_in') or row_dict.get('amin') or row_dict.get('clock_in') or row_dict.get('time_in') or row_dict.get('in'))
-    am_out = parse_time_str(row_dict.get('am_out') or row_dict.get('amout') or row_dict.get('break_out') or row_dict.get('lunch_out'))
-    pm_in = parse_time_str(row_dict.get('pm_in') or row_dict.get('pmin') or row_dict.get('break_in') or row_dict.get('lunch_in'))
-    pm_out = parse_time_str(row_dict.get('pm_out') or row_dict.get('pmout') or row_dict.get('clock_out') or row_dict.get('time_out') or row_dict.get('out'))
-    ot_in = parse_time_str(row_dict.get('overtime_in') or row_dict.get('otin') or row_dict.get('ot_in'))
-    ot_out = parse_time_str(row_dict.get('overtime_out') or row_dict.get('otout') or row_dict.get('ot_out'))
+    am_in = parse_time_str(normalized_row.get('amin') or normalized_row.get('clockin') or normalized_row.get('timein') or normalized_row.get('in'))
+    am_out = parse_time_str(normalized_row.get('amout') or normalized_row.get('breakout') or normalized_row.get('lunchout'))
+    pm_in = parse_time_str(normalized_row.get('pmin') or normalized_row.get('breakin') or normalized_row.get('lunchin'))
+    pm_out = parse_time_str(normalized_row.get('pmout') or normalized_row.get('clockout') or normalized_row.get('timeout') or normalized_row.get('out'))
+    ot_in = parse_time_str(normalized_row.get('overtimein') or normalized_row.get('otin'))
+    ot_out = parse_time_str(normalized_row.get('overtimeout') or normalized_row.get('otout'))
+
+    # Device exports commonly contain one row per punch with a Time and
+    # Check In/Check Out State column instead of separate AM/PM columns.
+    if not any((am_in, am_out, pm_in, pm_out, ot_in, ot_out)):
+        punch_time = parse_time_str(
+            normalized_row.get('time')
+            or normalized_row.get('timestamp')
+            or normalized_row.get('datetime')
+            or normalized_row.get('clocktime')
+        )
+        state = str(
+            normalized_row.get('state')
+            or normalized_row.get('status')
+            or normalized_row.get('event')
+            or normalized_row.get('punchtype')
+            or normalized_row.get('verification')
+            or ''
+        ).lower()
+        if punch_time:
+            is_out = any(token in state for token in ('out', 'checkout', 'check-out'))
+            is_in = any(token in state for token in ('in', 'checkin', 'check-in'))
+            if (is_out or punch_time.hour >= 13) and is_out:
+                pm_out = punch_time if punch_time.hour >= 13 else am_out
+                if punch_time.hour < 13:
+                    am_out = punch_time
+                    pm_out = None
+            elif is_in:
+                if punch_time.hour < 13:
+                    am_in = punch_time
+                else:
+                    pm_in = punch_time
+            elif punch_time.hour < 12:
+                am_in = punch_time
+            else:
+                pm_out = punch_time
 
     return {
         'biometric_id': bio_id,
@@ -393,6 +441,7 @@ def process_biometric_import(file_obj, file_name, user_identifier='SYSTEM'):
         anomalies_detected = 0
         new_persons_created = 0
         ojt_diffs_by_person = {}
+        imported_logs = []
 
         default_shift = Shift.objects.filter(code='DAY', is_archived=False).first()
 
@@ -457,13 +506,20 @@ def process_biometric_import(file_obj, file_name, user_identifier='SYSTEM'):
                 continue
             old_hours = existing_record.actual_hours if existing_record else Decimal('0.00')
 
+            # A device may export one row per punch. Preserve fields already
+            # loaded for the same employee/date while adding the next punch.
+            am_in_t = raw.get('am_in') or (existing_record.am_in.time() if existing_record and existing_record.am_in else None)
+            am_out_t = raw.get('am_out') or (existing_record.am_out.time() if existing_record and existing_record.am_out else None)
+            pm_in_t = raw.get('pm_in') or (existing_record.pm_in.time() if existing_record and existing_record.pm_in else None)
+            pm_out_t = raw.get('pm_out') or (existing_record.pm_out.time() if existing_record and existing_record.pm_out else None)
+
             computed = compute_daily_attendance(
                 person=person,
                 record_date=rec_date,
-                am_in_t=raw.get('am_in'),
-                am_out_t=raw.get('am_out'),
-                pm_in_t=raw.get('pm_in'),
-                pm_out_t=raw.get('pm_out'),
+                am_in_t=am_in_t,
+                am_out_t=am_out_t,
+                pm_in_t=pm_in_t,
+                pm_out_t=pm_out_t,
                 ot_in_t=raw.get('overtime_in'),
                 ot_out_t=raw.get('overtime_out'),
                 shift=shift
@@ -494,6 +550,23 @@ def process_biometric_import(file_obj, file_name, user_identifier='SYSTEM'):
                 }
             )
             records_imported += 1
+            imported_logs.append({
+                'id': str(att_record.id),
+                'person_id': str(person.id),
+                'person_name': person.name,
+                'person_type': person.person_type,
+                'biometric_id': bio_id or person.biometric_id or '',
+                'date': rec_date.isoformat(),
+                'am_in': att_record.am_in.isoformat() if att_record.am_in else '',
+                'am_out': att_record.am_out.isoformat() if att_record.am_out else '',
+                'pm_in': att_record.pm_in.isoformat() if att_record.pm_in else '',
+                'pm_out': att_record.pm_out.isoformat() if att_record.pm_out else '',
+                'actual_hours': float(att_record.actual_hours or 0),
+                'tardiness_minutes': int(att_record.tardiness_minutes or 0),
+                'status': att_record.status,
+                'is_abnormal': att_record.is_abnormal,
+                'batch_id': str(batch.id),
+            })
 
             hour_diff = computed['actual_hours'] - old_hours
             if hour_diff != 0 and person.person_type == 'OJT':
@@ -563,6 +636,7 @@ def process_biometric_import(file_obj, file_name, user_identifier='SYSTEM'):
         'batch_id': str(batch.id),
         'file_name': file_name,
         'records_imported': records_imported,
+        'logs': imported_logs,
         'anomalies_detected': anomalies_detected,
         'newly_created_accounts_count': new_persons_created,
         'period_start': period_start.isoformat(),

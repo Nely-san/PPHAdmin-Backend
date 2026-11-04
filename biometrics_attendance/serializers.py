@@ -50,6 +50,9 @@ class AttendanceRecordSerializer(serializers.ModelSerializer):
 
     def to_representation(self, instance):
         ret = super().to_representation(instance)
+        for field in ('am_in', 'am_out', 'pm_in', 'pm_out', 'overtime_in', 'overtime_out'):
+            value = getattr(instance, field)
+            ret[field] = value.strftime('%H:%M') if value else None
         ret['personId'] = ret.get('person')
         ret['personName'] = ret.get('person_name')
         ret['personType'] = ret.get('person_type')

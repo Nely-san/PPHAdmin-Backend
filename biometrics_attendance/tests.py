@@ -55,6 +55,63 @@ class BiometricsAttendanceTests(APITestCase):
             enrolled_by=None,
         )
 
+    def test_device_export_one_row_per_punch_preserves_clock_times(self):
+        csv_content = (
+            "AC-No,Name,Date,Time,State\n"
+            "101,John Biometrics,2026-03-02,08:58,Check In\n"
+            "101,John Biometrics,2026-03-02,12:00,Check Out\n"
+            "101,John Biometrics,2026-03-02,13:00,Check In\n"
+            "101,John Biometrics,2026-03-02,18:00,Check Out\n"
+        ).encode('utf-8')
+
+        uploaded = SimpleUploadedFile(
+            "attendance_punches.csv",
+            csv_content,
+            content_type="text/csv",
+        )
+        res = self.client.post(
+            '/api/biometrics/upload/',
+            {'file': uploaded},
+            format='multipart',
+        )
+
+        self.assertEqual(res.status_code, status.HTTP_200_OK)
+        record = AttendanceRecord.objects.filter(
+            person=self.person,
+            date=date(2026, 3, 2),
+        ).first()
+        self.assertIsNotNone(record)
+        self.assertEqual(record.am_in.time(), time(8, 58))
+        self.assertEqual(record.am_out.time(), time(12, 0))
+        self.assertEqual(record.pm_in.time(), time(13, 0))
+        self.assertEqual(record.pm_out.time(), time(18, 0))
+
+    def test_xlsx_ac_no_header_matches_existing_employee(self):
+        csv_content = (
+            "AC-No,Name,Date,AM In,AM Out,PM In,PM Out\n"
+            "101,John Biometrics,2026-03-02,08:58,12:00,13:00,18:00\n"
+        ).encode('utf-8')
+
+        from django.core.files.uploadedfile import SimpleUploadedFile
+        uploaded = SimpleUploadedFile(
+            "attendance_test.csv",
+            csv_content,
+            content_type="text/csv",
+        )
+        res = self.client.post(
+            '/api/biometrics/upload/',
+            {'file': uploaded},
+            format='multipart',
+        )
+
+        self.assertEqual(res.status_code, status.HTTP_200_OK)
+        record = AttendanceRecord.objects.filter(
+            person=self.person,
+            date=date(2026, 3, 2),
+        ).first()
+        self.assertIsNotNone(record)
+        self.assertEqual(record.person.name, 'John Biometrics')
+
     def test_compute_daily_attendance_ontime(self):
         rec_date = date(2026, 3, 1)
         res = compute_daily_attendance(

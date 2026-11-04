@@ -50,11 +50,53 @@ class PersonProfileSelfServiceSerializer(serializers.ModelSerializer):
             'education_school',
             'year_graduated',
             'character_references',
+            'partners_code',
+            'birth_date',
+            'birth_place',
+            'citizenship',
+            'gender',
+            'civil_status',
+            'tin_number',
+            'property_status',
+            'accreditation_date',
+            'current_position',
+            'previous_position',
+            'position_time_period',
+            'prc_license_number',
+            'prc_license_time_period',
+            'hlurb_license_number',
+            'hlurb_license_time_period',
+            'partners_recruiter',
+            'executive_partner',
+            'team_director',
+            'division_broker',
+        ]
+        read_only_fields = [
+            'partners_code',
+            'birth_date',
+            'birth_place',
+            'citizenship',
+            'gender',
+            'civil_status',
+            'tin_number',
+            'property_status',
+            'accreditation_date',
+            'current_position',
+            'previous_position',
+            'position_time_period',
+            'prc_license_number',
+            'prc_license_time_period',
+            'hlurb_license_number',
+            'hlurb_license_time_period',
+            'partners_recruiter',
+            'executive_partner',
+            'team_director',
+            'division_broker',
         ]
 
     def to_internal_value(self, data):
-        allowed_fields = set(self.fields.keys())
-        unknown_fields = set(data.keys()) - allowed_fields
+        writable_fields = {name for name, field in self.fields.items() if not field.read_only}
+        unknown_fields = set(data.keys()) - writable_fields
         if unknown_fields:
             locked_fields = ', '.join(sorted(unknown_fields))
             raise serializers.ValidationError({
@@ -139,7 +181,6 @@ class PersonProfileReadOnlySerializer(serializers.ModelSerializer):
             'gender',
             'civil_status',
             'tin_number',
-            'registration_date',
             'house_number',
             'street',
             'barangay',
@@ -181,7 +222,6 @@ class PersonProfileAdminWriteSerializer(serializers.ModelSerializer):
             'gender',
             'civil_status',
             'tin_number',
-            'registration_date',
             'property_status',
             'accreditation_date',
             'current_position',
@@ -209,6 +249,7 @@ class PersonDetailSerializer(serializers.ModelSerializer):
     username = serializers.CharField(source='user.username', read_only=True, default=None)
     approval_status = serializers.CharField(source='user.approval_status', read_only=True, default=None)
     is_active = serializers.BooleanField(source='user.is_active', read_only=True, default=None)
+    date_joined = serializers.DateTimeField(source='user.date_joined', read_only=True, default=None)
 
     biometric_id = serializers.CharField(read_only=True)
     profile = PersonProfileReadOnlySerializer(source='profile_extension', read_only=True)
@@ -222,7 +263,7 @@ class PersonDetailSerializer(serializers.ModelSerializer):
             'school_name', 'coordinator_contact', 
             'required_ojt_hours', 'rendered_ojt_hours', 'is_newly_imported',
             'work_setup', 'notes', 'shift_code', 'work_days', 'has_government_deductions',
-            'profile'
+            'profile', 'date_joined'
         ]
 
     def to_representation(self, instance):
@@ -243,6 +284,7 @@ class PersonDetailSerializer(serializers.ModelSerializer):
         ret['workSetup'] = ret.get('work_setup')
         ret['shiftCode'] = ret.get('shift_code')
         ret['workDays'] = ret.get('work_days')
+        ret['dateJoined'] = ret.get('date_joined')
         return ret
 
     def to_internal_value(self, data):
@@ -268,6 +310,8 @@ class PersonDetailSerializer(serializers.ModelSerializer):
         for camel, snake in camel_to_snake.items():
             if camel in mapped_data and snake not in mapped_data:
                 mapped_data[snake] = mapped_data[camel]
+        if mapped_data.get('date_started') == '':
+            mapped_data['date_started'] = None
         mapped_data.pop('biometric_id', None)
         mapped_data.pop('biometricId', None)
 
@@ -315,7 +359,7 @@ class PersonDetailSerializer(serializers.ModelSerializer):
 
 class PersonDetailAdminWriteSerializer(PersonDetailSerializer):
     profile = PersonProfileAdminWriteSerializer(source='profile_extension', required=False)
-    date_started = serializers.DateField(read_only=True)
+    date_started = serializers.DateField(required=False, allow_null=True)
 
     def to_internal_value(self, data):
         profile_data = data.get('profile')
@@ -358,6 +402,7 @@ class UserProfileSerializer(serializers.ModelSerializer):
     approved_by_username = serializers.CharField(source='approved_by.username', read_only=True)
     school_name = serializers.CharField(write_only=True, required=False, allow_null=True, allow_blank=True)
     schoolName = serializers.CharField(write_only=True, required=False, allow_null=True, allow_blank=True)
+    date_joined = serializers.DateTimeField(read_only=True)
 
     class Meta:
         model = User
@@ -366,7 +411,7 @@ class UserProfileSerializer(serializers.ModelSerializer):
             'role_code', 'role_id', 'person', 'password', 'is_active', 'is_staff', 
             'approval_status', 'rejection_reason', 'approved_by', 'approved_by_username',
             'approved_at', 'custom_permissions', 'is_archived', 'created_at',
-            'school_name', 'schoolName', 'biometrics'
+            'school_name', 'schoolName', 'biometrics', 'date_joined'
         ]
 
     def get_person(self, obj):

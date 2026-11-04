@@ -310,23 +310,6 @@ class AdminPersonProfileWriteTests(TestCase):
         self.assertEqual(response.data['profile']['mobile_number'], '09170000000')
         self.assertEqual(response.data['profile']['tin_number'], self.profile.tin_number)
 
-    def test_admin_cannot_update_date_started(self):
-        from datetime import date
-
-        self.person.date_started = date(2024, 1, 1)
-        self.person.save(update_fields=['date_started'])
-        self.client.force_authenticate(self.hr_admin)
-        response = self.client.patch(
-            f'/api/persons/{self.person.id}/',
-            {'date_started': '2020-01-01'},
-            format='json',
-        )
-        self.assertIn(
-            response.status_code,
-            (status.HTTP_200_OK, status.HTTP_400_BAD_REQUEST),
-        )
-        self.person.refresh_from_db()
-        self.assertEqual(str(self.person.date_started), '2024-01-01')
 
     def test_read_still_exposes_date_started(self):
         from datetime import date
@@ -354,6 +337,92 @@ class AdminPersonProfileWriteTests(TestCase):
         profile = PersonProfile.objects.get(person=person)
         self.assertEqual(str(person.date_started), '2025-03-15')
         self.assertEqual(str(profile.registration_date), '2025-03-15')
+
+    def test_registration_date_not_in_read_output(self):
+        self.client.force_authenticate(self.hr_admin)
+        response = self.client.get(f'/api/persons/{self.person.id}/')
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertNotIn('registration_date', response.data.get('profile', {}))
+        self.assertNotIn('registration_date', response.data)
+
+    def test_date_joined_exposed_in_read_output(self):
+        from django.utils.dateparse import parse_datetime
+        self.client.force_authenticate(self.hr_admin)
+        response = self.client.get(f'/api/persons/{self.person.id}/')
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertIn('date_joined', response.data)
+        self.assertIsNotNone(response.data['date_joined'])
+        self.assertEqual(parse_datetime(response.data['date_joined']), self.employee.date_joined)
+
+    def test_admin_with_profiles_edit_can_update_date_started(self):
+        from datetime import date
+        self.person.date_started = date(2024, 1, 1)
+        self.person.save(update_fields=['date_started'])
+        self.client.force_authenticate(self.hr_admin)
+        response = self.client.patch(
+            f'/api/persons/{self.person.id}/',
+            {'date_started': '2024-06-01'},
+            format='json',
+        )
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.person.refresh_from_db()
+        self.assertEqual(str(self.person.date_started), '2024-06-01')
+
+    def test_admin_without_profiles_edit_cannot_update_date_started(self):
+        from datetime import date
+        role, _ = Role.objects.get_or_create(
+            code='HR_NO_PROFILE_EDIT_DATE',
+            defaults={'name': 'HR No Profile Edit Date'},
+        )
+        employee_edit_permission, _ = PagePermission.objects.get_or_create(
+            code='employees:edit',
+            defaults={'name': 'Employees Edit', 'module': 'HR'},
+        )
+        employee_permission, _ = PagePermission.objects.get_or_create(
+            code='employees',
+            defaults={'name': 'Employees', 'module': 'HR'},
+        )
+        role.permissions.add(employee_permission, employee_edit_permission)
+        user = User.objects.create_user(
+            username='date_started_no_edit_admin',
+            password='Password123!',
+            role=role,
+        )
+        self.person.date_started = date(2024, 1, 1)
+        self.person.save(update_fields=['date_started'])
+
+        self.client.force_authenticate(user)
+        response = self.client.patch(
+            f'/api/persons/{self.person.id}/',
+            {'date_started': '2024-06-01'},
+            format='json',
+        )
+        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+        self.person.refresh_from_db()
+        self.assertEqual(str(self.person.date_started), '2024-01-01')
+
+    def test_date_started_update_is_audited(self):
+        from audit.models import AuditLog
+        import json
+        self.person.date_started = '2024-01-01'
+        self.person.save()
+
+        self.client.force_authenticate(self.hr_admin)
+        response = self.client.patch(
+            f'/api/persons/{self.person.id}/',
+            {'date_started': '2024-06-01'},
+            format='json',
+        )
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        audit_entry = AuditLog.objects.filter(
+            table_name=self.person._meta.db_table,
+            record_id=str(self.person.pk),
+            action='UPDATE',
+        ).order_by('-created_at').first()
+        self.assertIsNotNone(audit_entry)
+        new_data = json.loads(audit_entry.new_data)
+        self.assertEqual(new_data.get('date_started'), '2024-06-01')
+
 
 
 class BiometricEndpointTests(TestCase):
@@ -1450,6 +1519,67 @@ class PersonProfileSelfServiceApiTests(TestCase):
             CharacterReference.objects.filter(person_profile=self.profile).count(),
             old_reference_count,
         )
+
+    def test_me_response_includes_general_info_read_only(self):
+        from datetime import date
+        self.profile.birth_date = date(1990, 1, 1)
+        self.profile.birth_place = 'Manila'
+        self.profile.citizenship = 'Filipino'
+        self.profile.gender = 'Male'
+        self.profile.civil_status = 'Single'
+        self.profile.tin_number = '123-456-789'
+        self.profile.partners_code = 'PART-001'
+        self.profile.save()
+
+        response = self.client.get('/api/auth/me/')
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        profile_data = response.data.get('profile', {})
+        self.assertEqual(profile_data.get('birth_date'), '1990-01-01')
+        self.assertEqual(profile_data.get('birth_place'), 'Manila')
+        self.assertEqual(profile_data.get('citizenship'), 'Filipino')
+        self.assertEqual(profile_data.get('gender'), 'Male')
+        self.assertEqual(profile_data.get('civil_status'), 'Single')
+        self.assertEqual(profile_data.get('tin_number'), '123-456-789')
+        self.assertEqual(profile_data.get('partners_code'), 'PART-001')
+
+    def test_me_patch_cannot_write_general_info(self):
+        from datetime import date
+        self.profile.birth_date = date(1990, 1, 1)
+        self.profile.tin_number = '123-456-789'
+        self.profile.save()
+
+        response = self.client.patch('/api/auth/me/', {
+            'birth_date': '2000-01-01',
+            'tin_number': '999-999-999',
+        }, format='json')
+        self.assertIn(response.status_code, (status.HTTP_200_OK, status.HTTP_400_BAD_REQUEST))
+        self.profile.refresh_from_db()
+        self.assertEqual(str(self.profile.birth_date), '1990-01-01')
+        self.assertEqual(self.profile.tin_number, '123-456-789')
+
+    def test_me_response_includes_property_info_read_only(self):
+        self.profile.property_status = 'Active'
+        self.profile.prc_license_number = 'PRC-99999'
+        self.profile.division_broker = 'Broker Jane'
+        self.profile.save()
+
+        response = self.client.get('/api/auth/me/')
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        profile_data = response.data.get('profile', {})
+        self.assertEqual(profile_data.get('property_status'), 'Active')
+        self.assertEqual(profile_data.get('prc_license_number'), 'PRC-99999')
+        self.assertEqual(profile_data.get('division_broker'), 'Broker Jane')
+
+    def test_me_patch_cannot_write_property_info(self):
+        self.profile.property_status = 'Original Status'
+        self.profile.save()
+
+        response = self.client.patch('/api/auth/me/', {
+            'property_status': 'Bogus',
+        }, format='json')
+        self.assertIn(response.status_code, (status.HTTP_200_OK, status.HTTP_400_BAD_REQUEST))
+        self.profile.refresh_from_db()
+        self.assertEqual(self.profile.property_status, 'Original Status')
 
 
 class PersonProfileModelTests(TestCase):

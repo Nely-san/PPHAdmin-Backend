@@ -109,6 +109,10 @@ class User(AbstractBaseUser, PermissionsMixin, BaseModel):
     USERNAME_FIELD = 'username'
     REQUIRED_FIELDS = []
 
+    @property
+    def date_joined(self):
+        return self.created_at
+
     class Meta:
         db_table = 'users'
         ordering = ['username']

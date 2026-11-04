@@ -370,7 +370,7 @@ class HasEmployeePermission(permissions.BasePermission):
             return 'employees' in all_codes or 'personnel' in all_codes
 
         if request.method in ['PUT', 'PATCH']:
-            if 'profile' in request.data:
+            if 'profile' in request.data or 'date_started' in request.data or 'dateStarted' in request.data:
                 if 'employees:profiles:edit' in all_codes:
                     return True
                 return False

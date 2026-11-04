@@ -87,8 +87,8 @@ REST_FRAMEWORK = {
         'rest_framework.throttling.UserRateThrottle',
     ),
     'DEFAULT_THROTTLE_RATES': {
-        'anon': '30/minute',
-        'user': '120/minute',
+        'anon': os.environ.get('ANON_THROTTLE_RATE', '60/minute'),
+        'user': os.environ.get('USER_THROTTLE_RATE', '300/minute'),
         'auth_login': '5/minute',
         'password_reset': '5/hour',
     }
@@ -235,4 +235,3 @@ MAILERS = {
 # [STEP 4]: Paste your Client ID and Client Secret below or in your .env file:
 GOOGLE_CLIENT_ID = os.environ.get('GOOGLE_CLIENT_ID', 'YOUR_GOOGLE_CLIENT_ID.apps.googleusercontent.com')
 GOOGLE_CLIENT_SECRET = os.environ.get('GOOGLE_CLIENT_SECRET', 'YOUR_GOOGLE_CLIENT_SECRET')
-
