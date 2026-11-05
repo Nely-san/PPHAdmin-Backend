@@ -18,14 +18,37 @@ from biometrics_attendance.serializers import (
 )
 from biometrics_attendance.engine import process_biometric_import
 from users.models import Person
+from users.views import user_has_module_permission
 
-class BiometricImportViewSet(viewsets.ReadOnlyModelViewSet):
+class HasBiometricUploadPermission(permissions.BasePermission):
+    """
+    RBAC permission for biometric upload endpoint.
+    Requires 'attendance:biometrics' edit/add permission or management role.
+    """
+    def has_permission(self, request, view):
+        if not request.user or not request.user.is_authenticated:
+            return False
+        if request.method in permissions.SAFE_METHODS:
+            return user_has_module_permission(
+                request.user,
+                'attendance:biometrics',
+                action='view',
+                allowed_role_codes=['ADMIN', 'HR_ADMIN', 'HR_MANAGER']
+            )
+        return user_has_module_permission(
+            request.user,
+            'attendance:biometrics',
+            action='edit',
+            allowed_role_codes=['ADMIN', 'HR_ADMIN', 'HR_MANAGER']
+        )
+
+class BiometricImportViewSet(viewsets.ModelViewSet):
     """
     ViewSet for Biometric Import Batches and File Processing.
     """
     queryset = BiometricImportBatch.objects.all().order_by('-imported_at')
     serializer_class = BiometricImportBatchSerializer
-    permission_classes = [permissions.IsAuthenticated]
+    permission_classes = [permissions.IsAuthenticated, HasBiometricUploadPermission]
     parser_classes = [MultiPartParser, FormParser, JSONParser]
 
     @action(detail=False, methods=['post'], url_path='upload')
@@ -57,6 +80,58 @@ class BiometricImportViewSet(viewsets.ReadOnlyModelViewSet):
 
         return Response(result, status=status.HTTP_200_OK)
 
+    def destroy(self, request, *args, **kwargs):
+        """
+        Deletes a biometric batch and any associated unlocked attendance records and raw logs.
+        """
+        instance = self.get_object()
+        file_name = instance.file_name
+        batch_id = str(instance.id)
+
+        deleted_logs_count = instance.raw_logs.all().delete()[0]
+        deleted_att_count = instance.attendance_records.filter(is_locked=False).delete()[0]
+        instance.delete()
+
+        from settings.models import AuditLog
+        AuditLog.objects.create(
+            table_name='biometric_import_batches',
+            action='DELETE',
+            changed_by=request.user.username if request.user else 'SYSTEM',
+            new_data=f"Deleted biometric import batch '{file_name}' ({batch_id}): {deleted_logs_count} logs, {deleted_att_count} attendance records removed."
+        )
+
+        return Response({
+            'success': True,
+            'message': f"Biometric batch '{file_name}' and its associated records were successfully deleted."
+        }, status=status.HTTP_200_OK)
+
+    @action(detail=False, methods=['delete', 'post'], url_path='clear-latest')
+    def clear_latest(self, request):
+        """
+        Deletes the most recently uploaded biometric batch and its records.
+        """
+        latest = BiometricImportBatch.objects.order_by('-imported_at').first()
+        if not latest:
+            return Response({'success': True, 'message': 'No biometric batches to delete.'}, status=status.HTTP_200_OK)
+
+        file_name = latest.file_name
+        batch_id = str(latest.id)
+        deleted_logs_count = latest.raw_logs.all().delete()[0]
+        deleted_att_count = latest.attendance_records.filter(is_locked=False).delete()[0]
+        latest.delete()
+
+        from settings.models import AuditLog
+        AuditLog.objects.create(
+            table_name='biometric_import_batches',
+            action='DELETE',
+            changed_by=request.user.username if request.user else 'SYSTEM',
+            new_data=f"Cleared latest biometric batch '{file_name}' ({batch_id}): {deleted_logs_count} logs, {deleted_att_count} attendance records removed."
+        )
+
+        return Response({
+            'success': True,
+            'message': f"Latest biometric batch '{file_name}' deleted successfully."
+        }, status=status.HTTP_200_OK)
 
 class AttendanceRecordViewSet(viewsets.ModelViewSet):
     """
@@ -168,8 +243,14 @@ class AttendanceRecordViewSet(viewsets.ModelViewSet):
             )
         am_in_t = data.get('am_in') or time(9, 0)
         pm_out_t = data.get('pm_out') or time(18, 0)
-        dt_am_in = datetime.combine(log_date, am_in_t)
-        dt_pm_out = datetime.combine(log_date, pm_out_t)
+        dt_am_in = timezone.make_aware(
+            datetime.combine(log_date, am_in_t),
+            timezone.get_current_timezone(),
+        )
+        dt_pm_out = timezone.make_aware(
+            datetime.combine(log_date, pm_out_t),
+            timezone.get_current_timezone(),
+        )
 
         worked_mins = max(0, int((dt_pm_out - dt_am_in).total_seconds() / 60) - 60)
         actual_hours = round(Decimal(worked_mins) / Decimal(60), 2)

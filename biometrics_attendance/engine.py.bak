@@ -1,0 +1,1071 @@
+import io
+import csv
+import re
+from datetime import datetime, date, time, timedelta
+from decimal import Decimal
+from django.utils import timezone
+from django.db import transaction
+try:
+    import openpyxl
+except ImportError:
+    openpyxl = None
+
+try:
+    import xlrd
+except ImportError:
+    xlrd = None
+
+from users.models import Person
+from scheduling.models import Shift, Schedule
+from biometrics_attendance.models import (
+    BiometricImportBatch, BiometricLog, AttendanceRecord, AbnormalClocking,
+    BiometricEnrollment
+)
+
+def make_aware_if_needed(dt):
+    if dt and timezone.is_naive(dt):
+        return timezone.make_aware(dt)
+    return dt
+
+def parse_time_str(val):
+    if val is None:
+        return None
+    # Excel numeric: day-fraction (0<v<1) or combined date-time serial (v>=1)
+    if isinstance(val, (int, float)):
+        frac = float(val) % 1
+        if frac == 0 and float(val) < 1:
+            return None            # 0.0 means midnight / no time
+        total_minutes = round(frac * 24 * 60)
+        h, m = divmod(total_minutes, 60)
+        return time(hour=h % 24, minute=m)
+    s = str(val).strip()
+    if not s or s.lower() in ('none', 'null', '-', '--:--', ''):
+        return None
+    formats = ['%H:%M:%S', '%H:%M', '%I:%M:%S %p', '%I:%M %p', '%I:%M%p']
+    for fmt in formats:
+        try:
+            return datetime.strptime(s, fmt).time()
+        except ValueError:
+            pass
+    m = re.search(r'(\d{1,2}):(\d{2})', s)
+    if m:
+        try:
+            return time(hour=int(m.group(1)), minute=int(m.group(2)))
+        except ValueError:
+            pass
+    return None
+
+def parse_date_str(val):
+    if not val:
+        return None
+    if isinstance(val, (datetime, date)):
+        return val.date() if isinstance(val, datetime) else val
+    val = str(val).strip()
+    formats = ['%Y-%m-%d', '%m/%d/%Y', '%d/%m/%Y', '%Y/%m/%d', '%d-%m-%Y', '%b %d, %Y', '%B %d, %Y']
+    for fmt in formats:
+        try:
+            return datetime.strptime(val, fmt).date()
+        except ValueError:
+            pass
+    m = re.search(r'(\d{4})[-/](\d{1,2})[-/](\d{1,2})', val)
+    if m:
+        try:
+            return date(year=int(m.group(1)), month=int(m.group(2)), day=int(m.group(3)))
+        except ValueError:
+            pass
+    return None
+
+def extract_rows_from_file(file_obj, file_name):
+    content = file_obj.read()
+    file_obj.seek(0)
+    lower_name = file_name.lower()
+
+    # --- Biometric device multi-sheet export (.xls, xlrd) ---
+    if lower_name.endswith('.xls') and xlrd is not None:
+        try:
+            book = xlrd.open_workbook(file_contents=content)
+            sheet_names_lower = [n.lower() for n in book.sheet_names()]
+            has_logs = any('logs' == n or 'log' in n for n in sheet_names_lower)
+            has_abnormal = any('abnormal' in n for n in sheet_names_lower)
+            if has_logs or has_abnormal:
+                records = _parse_biometric_workbook(book)
+                if records:
+                    return records
+                else:
+                    print("[biometrics] multi-sheet workbook yielded 0 records")
+        except Exception as e:
+            print(f"[biometrics] xls workbook parse failed: {e}")
+
+    # --- Legacy single-sheet .xls (timecard export from other devices) ---
+    if lower_name.endswith('.xls'):
+        try:
+            book = xlrd.open_workbook(file_contents=content)
+            sheet = book.sheet_by_index(0)
+            if sheet.nrows > 0:
+                rows = [[sheet.cell_value(r, c) for c in range(sheet.ncols)]
+                        for r in range(sheet.nrows)]
+                return _rows_to_records(rows)
+        except Exception as e:
+            print(f"[biometrics] legacy xls parse failed: {e}")
+
+    # --- .xlsx (single sheet) ---
+    if lower_name.endswith('.xlsx') and openpyxl is not None:
+        try:
+            wb = openpyxl.load_workbook(io.BytesIO(content), data_only=True)
+            ws = wb.active
+            rows = list(ws.iter_rows(values_only=True))
+            return _rows_to_records(rows)
+        except Exception as e:
+            print(f"[biometrics] xlsx parse failed: {e}")
+
+    # --- HTML-in-XLS fallback ---
+    head = content[:512].lower()
+    if b'<table' in head or b'<html' in head:
+        try:
+            text = content.decode('utf-8', errors='ignore')
+            records = parse_html_statistic(text)
+            if records:
+                return records
+        except Exception as e:
+            print(f"[biometrics] HTML parse failed: {e}")
+
+    # --- CSV fallback ---
+    try:
+        text = content.decode('utf-8', errors='ignore')
+        reader = csv.DictReader(io.StringIO(text))
+        records = []
+        for row in reader:
+            normalized_row = {k.strip().lower(): v for k, v in row.items() if k}
+            if any(normalized_row.values()):
+                records.append(normalize_raw_row(normalized_row))
+        return records
+    except Exception as e:
+        print(f"[biometrics] csv parse failed: {e}")
+
+    return []
+
+
+# ============================================================================
+# Biometric multi-sheet workbook parser (PATCH 11)
+# ============================================================================
+
+def _parse_biometric_workbook(book):
+    """
+    Parse the biometric device's multi-sheet export.
+    Sheets typically present: Summary, Shifts, Logs, Abnormal, then one
+    per-person 'Attendance Table' sheet per group of 3 employees.
+
+    Strategy:
+      1. Read Abnormal sheet  -> per-day tardiness/early-leave annotations
+      2. Read Logs sheet      -> per-day raw clock times (the source of truth)
+      3. Merge by (biometric_id, date)
+      4. Fall back to Abnormal-only if Logs is missing/unreadable
+    """
+    sheet_names_lower = [n.lower() for n in book.sheet_names()]
+
+    abnormal = {}
+    if any('abnormal' in n for n in sheet_names_lower):
+        idx = next(i for i, n in enumerate(sheet_names_lower) if 'abnormal' in n)
+        abnormal = _parse_abnormal_annotations(book.sheet_by_index(idx))
+        print(f"[biometrics] parsed {len(abnormal)} abnormal annotations")
+
+    schedule = {}
+    if any('shift' in n for n in sheet_names_lower):
+        idx = next(i for i, n in enumerate(sheet_names_lower) if 'shift' in n)
+        shifts_sheet = book.sheet_by_index(idx)
+        schedule = _parse_shifts_sheet(shifts_sheet, *_parse_period(shifts_sheet))
+        print(f"[biometrics] parsed {len(schedule)} scheduled weekday person-days")
+
+    if any('logs' == n or n == 'log' for n in sheet_names_lower):
+        idx = next(i for i, n in enumerate(sheet_names_lower) if n in ('logs', 'log'))
+        log_records = _parse_logs_sheet(book.sheet_by_index(idx), abnormal, schedule)
+        print(f"[biometrics] parsed {len(log_records)} log records")
+        if log_records:
+            return log_records
+
+    # Fallback: build records from Abnormal alone
+    if abnormal:
+        print("[biometrics] Logs sheet missing; falling back to Abnormal-only import")
+        return _abnormal_to_records(abnormal)
+
+    return []
+
+
+def _parse_period(sheet):
+    """
+    Find the 'Period : 2026/07/01 ~ 07/14' line and return
+    (year, month_start) so day numbers can be turned into full dates.
+    """
+    for r in range(min(6, sheet.nrows)):
+        for c in range(sheet.ncols):
+            val = str(sheet.cell_value(r, c))
+            if 'period' in val.lower() or '~' in val:
+                m = re.search(r'(\d{4})/(\d{1,2})/(\d{1,2})', val)
+                if m:
+                    year = int(m.group(1))
+                    month = int(m.group(2))
+                    return year, month
+    return None, None
+
+
+def _parse_logs_sheet(sheet, abnormal, schedule):
+    """
+    Logs sheet layout:
+      Row 0: "List of Logs"
+      Row 1: blank
+      Row 2: Period line
+      Row 3: day numbers  1..31
+      Row 4: person header block 1  [No: | | 1 | ... | Name | | JERALD | ...]
+      Row 5: person's clock cells ['' | '13:14<br>18:33<br>' | '' | ...]
+      Row 6: blank
+      Row 7: person header block 2
+      ...
+    """
+    year, month = _parse_period(sheet)
+    if not year:
+        print("[biometrics] Logs sheet: could not parse Period, aborting")
+        return []
+
+    day_columns = {}
+    day_row = None
+    for r in range(min(10, sheet.nrows)):
+        row = [sheet.cell_value(r, c) for c in range(sheet.ncols)]
+        day_map = {}
+        for c, v in enumerate(row):
+            try:
+                dv = int(float(v))
+                if 1 <= dv <= 31:
+                    day_map[dv] = c
+            except (ValueError, TypeError):
+                pass
+        if len(day_map) >= 20:
+            day_columns = day_map
+            day_row = r
+            break
+
+    print(f"[biometrics] day_row={day_row} day_count={len(day_columns)}")
+
+    if not day_columns:
+        print("[biometrics] Logs sheet: day columns not found")
+        return []
+
+    records = []
+    r = day_row + 1
+    current_person = None
+
+    while r < sheet.nrows:
+        row = [sheet.cell_value(r, c) for c in range(sheet.ncols)]
+
+        has_no = any(str(v).strip().lower().rstrip(':') == 'no' for v in row if v is not None)
+        has_name = any(str(v).strip().lower().rstrip(':') == 'name' for v in row if v is not None)
+
+        if has_no and has_name:
+            bio_id = None
+            name = None
+            for c, v in enumerate(row):
+                sv = str(v).strip()
+                if sv.lower().rstrip(':') == 'no':
+                    if c + 2 < len(row):
+                        try:
+                            bio_id = str(int(float(row[c + 2]))).strip()
+                        except (ValueError, TypeError):
+                            bio_id = str(row[c + 2]).strip()
+                if sv.lower().rstrip(':') == 'name' and c + 2 < len(row):
+                    name = str(row[c + 2]).strip()
+            current_person = {'bio_id': bio_id, 'name': name}
+            r += 1
+            continue
+
+        if current_person and current_person.get('bio_id'):
+            # Step 1: collect punches for this person's times row
+            person_punches = {}
+            for day, col_idx in day_columns.items():
+                cell_val = str(row[col_idx]) if col_idx < len(row) else ''
+                if not cell_val.strip():
+                    continue
+                times = _extract_times_from_cell(cell_val)
+                if not times:
+                    continue
+                date_val = _build_date(year, month, day)
+                if not date_val:
+                    continue
+                am_in = am_out = pm_in = pm_out = None
+                for t in times:
+                    if t.hour < 12 and am_in is None:        am_in = t
+                    elif t.hour < 12 and am_out is None:     am_out = t
+                    elif t.hour >= 12 and pm_in is None:     pm_in = t
+                    elif t.hour >= 12 and pm_out is None:    pm_out = t
+                    elif t.hour >= 12:                       pm_out = t
+                person_punches[date_val] = {
+                    'am_in': am_in, 'am_out': am_out,
+                    'pm_in': pm_in, 'pm_out': pm_out,
+                }
+
+            # Step 2: emit records for every scheduled day, plus any punch day
+            bio_id = current_person['bio_id']
+            name = current_person['name']
+            scheduled_dates = {d for (bid, d) in schedule.keys() if bid == bio_id}
+            all_dates = scheduled_dates | set(person_punches.keys())
+            for date_val in sorted(all_dates):
+                times = person_punches.get(date_val, {})
+                annot = abnormal.get((bio_id, date_val), {})
+                records.append({
+                    'biometric_id': bio_id,
+                    'name': name,
+                    'date': date_val,
+                    'am_in': times.get('am_in'),
+                    'am_out': times.get('am_out'),
+                    'pm_in': times.get('pm_in'),
+                    'pm_out': times.get('pm_out'),
+                    'overtime_in': None,
+                    'overtime_out': None,
+                    '_tardiness_minutes': annot.get('tardiness', 0),
+                    '_early_leave_minutes': annot.get('early_leave', 0),
+                })
+            current_person = None
+        r += 1
+
+    return records
+
+
+def _parse_abnormal_annotations(sheet):
+    """
+    Returns: {(biometric_id, date): {tardiness: int, early_leave: int}}
+    """
+    header_row = None
+    for r in range(min(8, sheet.nrows)):
+        row = [str(sheet.cell_value(r, c)).strip().lower() for c in range(sheet.ncols)]
+        if 'no' in row and 'date' in row:
+            header_row = r
+            break
+    if header_row is None:
+        return {}
+
+    headers = [str(sheet.cell_value(header_row, c)).strip().lower() for c in range(sheet.ncols)]
+    col = {}
+    for c, h in enumerate(headers):
+        if h == 'no' and 'no' not in col: col['no'] = c
+        elif h == 'date' and 'date' not in col: col['date'] = c
+        elif 'tardiness' in h and 'tardiness' not in col: col['tardiness'] = c
+        elif 'early leave' in h and 'early_leave' not in col: col['early_leave'] = c
+
+    if 'date' not in col or 'no' not in col:
+        return {}
+
+    annotations = {}
+    for r in range(header_row + 2, sheet.nrows):
+        row = [sheet.cell_value(r, c) for c in range(sheet.ncols)]
+        no_val = row[col['no']] if col['no'] < len(row) else None
+        date_cell = row[col['date']] if col['date'] < len(row) else None
+        if no_val is None or date_cell is None:
+            continue
+        try:
+            bio_id = str(int(float(no_val))).strip()
+        except (ValueError, TypeError):
+            bio_id = str(no_val).strip()
+        date_val = parse_date_str(date_cell) or _excel_serial_to_date(date_cell)
+        if not date_val:
+            continue
+
+        def _num(v):
+            try:
+                return int(float(v or 0))
+            except (ValueError, TypeError):
+                return 0
+
+        annotations[(bio_id, date_val)] = {
+            'tardiness': _num(row[col['tardiness']]) if 'tardiness' in col else 0,
+            'early_leave': _num(row[col['early_leave']]) if 'early_leave' in col else 0,
+        }
+    return annotations
+
+def _parse_shifts_sheet(sheet, year, month):
+    """
+    Parse the Shifts sheet into a schedule set.
+    Returns {(bio_id_str, date): True} for Mon-Fri days where the person
+    has a '1' flag. Weekends (Sa/Su) and days without '1' are omitted.
+    """
+    if year is None or month is None:
+        return {}
+
+    # Locate day-number row and weekday-label row within first 5 rows
+    day_row = None
+    weekday_row = None
+    for r in range(min(5, sheet.nrows)):
+        row_vals = [str(sheet.cell_value(r, c)).strip() for c in range(sheet.ncols)]
+        numeric_days = 0
+        for v in row_vals:
+            try:
+                dv = int(float(v))
+                if 1 <= dv <= 31:
+                    numeric_days += 1
+            except (ValueError, TypeError):
+                pass
+        if numeric_days >= 10 and day_row is None:
+            day_row = r
+            continue
+        wk_count = sum(1 for v in row_vals if v.lower() in ('mo','tu','we','th','fr','sa','su'))
+        if wk_count >= 10 and weekday_row is None:
+            weekday_row = r
+
+    if day_row is None or weekday_row is None:
+        print(f"[biometrics] Shifts: header rows not found (day_row={day_row}, weekday_row={weekday_row})")
+        return {}
+
+    # Build day -> (column, weekday) mapping
+    day_map = {}          # day_number -> (col_index, weekday_lower)
+    for c in range(sheet.ncols):
+        try:
+            dv = int(float(sheet.cell_value(day_row, c)))
+        except (ValueError, TypeError):
+            continue
+        if not (1 <= dv <= 31):
+            continue
+        wd = str(sheet.cell_value(weekday_row, c)).strip().lower()
+        day_map[dv] = (c, wd)
+
+    if not day_map:
+        print("[biometrics] Shifts: no day columns detected")
+        return {}
+
+    schedule = {}
+    for r in range(day_row + 2, sheet.nrows):
+        bio_raw = sheet.cell_value(r, 0)
+        name_raw = sheet.cell_value(r, 1)
+        if not str(bio_raw).strip() or not str(name_raw).strip():
+            continue
+        try:
+            bio_id = str(int(float(bio_raw))).strip()
+        except (ValueError, TypeError):
+            bio_id = str(bio_raw).strip()
+
+        for day_num, (col, weekday) in day_map.items():
+            if weekday in ('sa', 'su'):
+                continue                     # requirement: no weekends
+            cell_str = str(sheet.cell_value(r, col)).strip()
+            if cell_str == '1':
+                d = _build_date(year, month, day_num)
+                if d:
+                    schedule[(bio_id, d)] = True
+
+    return schedule
+
+
+def _abnormal_to_records(abnormal):
+    records = []
+    for (bio_id, date_val), annot in abnormal.items():
+        records.append({
+            'biometric_id': bio_id,
+            'name': '',
+            'date': date_val,
+            'am_in': None, 'am_out': None, 'pm_in': None, 'pm_out': None,
+            'overtime_in': None, 'overtime_out': None,
+            '_tardiness_minutes': annot.get('tardiness', 0),
+            '_early_leave_minutes': annot.get('early_leave', 0),
+        })
+    return records
+
+
+def _extract_times_from_cell(cell_str):
+    """
+    Cell contains '<br>'-separated times like '13:14<br>18:33<br>'.
+    """
+    times = []
+    for part in re.split(r'<br\s*/?>|\n', str(cell_str)):
+        part = part.strip()
+        if not part:
+            continue
+        t = parse_time_str(part)
+        if t:
+            times.append(t)
+    return times
+
+
+def _build_date(year, month, day):
+    try:
+        return date(year, month, day)
+    except ValueError:
+        return None
+
+
+def _excel_serial_to_date(val):
+    if isinstance(val, (datetime, date)):
+        return val.date() if isinstance(val, datetime) else val
+    if isinstance(val, (int, float)) and val > 1:
+        try:
+            return (datetime(1899, 12, 30) + timedelta(days=float(val))).date()
+        except (ValueError, OverflowError):
+            return None
+    return parse_date_str(val)
+
+
+def _rows_to_records(rows):
+    if not rows:
+        return []
+    header_tokens = {
+        'id', 'pin', 'name', 'date', 'time', 'state', 'status',
+        'in', 'out', 'am', 'pm', 'employee', 'biometric', 'person',
+        'enroll', 'user', 'no', 'ac', 'datetime', 'timestamp',
+    }
+
+    def score(row):
+        return sum(1 for c in row if c is not None and any(
+            tok in str(c).strip().lower() for tok in header_tokens))
+
+    best_idx, best_score = 0, 0
+    for i, row in enumerate(rows[:10]):
+        s = score(row)
+        if s > best_score:
+            best_score, best_idx = s, i
+
+    if best_score == 0:
+        return []
+
+    headers = [str(c).strip().lower() if c is not None else '' for c in rows[best_idx]]
+    out = []
+    for row in rows[best_idx + 1:]:
+        row_dict = {h: v for h, v in zip(headers, row) if h}
+        if any(v is not None and str(v).strip() for v in row_dict.values()):
+            out.append(normalize_raw_row(row_dict))
+    return out
+
+def parse_html_statistic(html_text):
+    rows = re.findall(r'<tr[^>]*>(.*?)</tr>', html_text, re.DOTALL | re.IGNORECASE)
+    records = []
+    current_bio_id = None
+    current_name = None
+
+    for r in rows:
+        cols = [re.sub(r'<[^>]+>', '', c).strip() for c in re.findall(r'<td[^>]*>(.*?)</td>', r, re.DOTALL | re.IGNORECASE)]
+        if not cols:
+            continue
+        line = " ".join(cols)
+        id_match = re.search(r'(?:No\.|ID|User ID|Enroll ID)\s*[:：]\s*(\d+)', line, re.IGNORECASE)
+        name_match = re.search(r'Name\s*[:：]\s*([A-Za-z0-9\s._-]+)', line, re.IGNORECASE)
+        if id_match:
+            current_bio_id = id_match.group(1).strip()
+        if name_match:
+            current_name = name_match.group(1).strip()
+
+        date_val = None
+        for col in cols:
+            d = parse_date_str(col)
+            if d:
+                date_val = d
+                break
+
+        if date_val and (current_bio_id or len(cols) >= 3):
+            times = []
+            for col in cols:
+                t = parse_time_str(col)
+                if t:
+                    times.append(t)
+            
+            am_in = times[0] if len(times) > 0 else None
+            am_out = times[1] if len(times) > 1 else None
+            pm_in = times[2] if len(times) > 2 else None
+            pm_out = times[3] if len(times) > 3 else (times[1] if len(times) == 2 and times[1].hour >= 13 else None)
+            ot_in = times[4] if len(times) > 4 else None
+            ot_out = times[5] if len(times) > 5 else None
+
+            records.append({
+                'biometric_id': current_bio_id or cols[0],
+                'name': current_name or (cols[1] if len(cols) > 1 else 'Employee'),
+                'date': date_val,
+                'am_in': am_in,
+                'am_out': am_out,
+                'pm_in': pm_in,
+                'pm_out': pm_out,
+                'overtime_in': ot_in,
+                'overtime_out': ot_out,
+            })
+    return records
+
+
+def normalize_raw_row(row_dict):
+    bio_id = None
+    name = None
+    normalized_row = {
+        re.sub(r'[^a-z0-9]', '', str(k).lower()):
+        v
+        for k, v in row_dict.items()
+    }
+
+    bio_aliases = (
+        'biometricid', 'enrollid', 'userid', 'personid', 'employeeid',
+        'staffid', 'id', 'pin', 'acno', 'no',
+    )
+    for k in bio_aliases:
+        if normalized_row.get(k):
+            bio_id = str(normalized_row[k]).strip()
+            if bio_id.endswith('.0'):
+                bio_id = bio_id[:-2]
+            bio_id = bio_id.strip()
+            break
+
+    for k in ('name', 'personname', 'employeename', 'fullname', 'employee'):
+        if normalized_row.get(k):
+            name = str(normalized_row[k]).strip()
+            break
+
+    date_val = None
+    for k in ('date', 'datetime', 'workdate', 'attendancedate', 'attdate', 'day'):
+        if normalized_row.get(k):
+            date_val = parse_date_str(normalized_row[k])
+            if date_val:
+                break
+
+    am_in = parse_time_str(normalized_row.get('amin') or normalized_row.get('clockin') or normalized_row.get('timein') or normalized_row.get('in'))
+    am_out = parse_time_str(normalized_row.get('amout') or normalized_row.get('breakout') or normalized_row.get('lunchout'))
+    pm_in = parse_time_str(normalized_row.get('pmin') or normalized_row.get('breakin') or normalized_row.get('lunchin'))
+    pm_out = parse_time_str(normalized_row.get('pmout') or normalized_row.get('clockout') or normalized_row.get('timeout') or normalized_row.get('out'))
+    ot_in = parse_time_str(normalized_row.get('overtimein') or normalized_row.get('otin'))
+    ot_out = parse_time_str(normalized_row.get('overtimeout') or normalized_row.get('otout'))
+
+    # Device exports commonly contain one row per punch with a Time and
+    # Check In/Check Out State column instead of separate AM/PM columns.
+    if not any((am_in, am_out, pm_in, pm_out, ot_in, ot_out)):
+        punch_time = parse_time_str(
+            normalized_row.get('time')
+            or normalized_row.get('timestamp')
+            or normalized_row.get('datetime')
+            or normalized_row.get('clocktime')
+        )
+        state = str(
+            normalized_row.get('state')
+            or normalized_row.get('status')
+            or normalized_row.get('event')
+            or normalized_row.get('punchtype')
+            or normalized_row.get('verification')
+            or ''
+        ).lower()
+        if punch_time:
+            is_out = any(token in state for token in ('out', 'checkout', 'check-out'))
+            is_in = any(token in state for token in ('in', 'checkin', 'check-in'))
+            if (is_out or punch_time.hour >= 13) and is_out:
+                pm_out = punch_time if punch_time.hour >= 13 else am_out
+                if punch_time.hour < 13:
+                    am_out = punch_time
+                    pm_out = None
+            elif is_in:
+                if punch_time.hour < 13:
+                    am_in = punch_time
+                else:
+                    pm_in = punch_time
+            elif punch_time.hour < 12:
+                am_in = punch_time
+            else:
+                pm_out = punch_time
+
+    return {
+        'biometric_id': bio_id,
+        'name': name or f'Biometric User #{bio_id}' if bio_id else 'Employee',
+        'date': date_val or timezone.now().date(),
+        'am_in': am_in,
+        'am_out': am_out,
+        'pm_in': pm_in,
+        'pm_out': pm_out,
+        'overtime_in': ot_in,
+        'overtime_out': ot_out,
+    }
+
+
+def compute_daily_attendance(person, record_date, am_in_t, am_out_t, pm_in_t, pm_out_t, ot_in_t, ot_out_t, shift=None):
+    grace_mins = shift.grace_period_mins if shift else 10
+    start_str = shift.start_time if shift else '09:00'
+    end_str = shift.end_time if shift else '18:00'
+    shift_start_t = parse_time_str(start_str) or time(9, 0)
+    shift_end_t = parse_time_str(end_str) or time(18, 0)
+
+    # 1. Combine date + time to make datetimes
+    dt_am_in = timezone.make_aware(
+        datetime.combine(record_date, am_in_t),
+        timezone.get_current_timezone(),
+    ) if am_in_t else None
+    dt_am_out = timezone.make_aware(
+        datetime.combine(record_date, am_out_t),
+        timezone.get_current_timezone(),
+    ) if am_out_t else None
+    dt_pm_in = timezone.make_aware(
+        datetime.combine(record_date, pm_in_t),
+        timezone.get_current_timezone(),
+    ) if pm_in_t else None
+    dt_pm_out = timezone.make_aware(
+        datetime.combine(record_date, pm_out_t),
+        timezone.get_current_timezone(),
+    ) if pm_out_t else None
+    dt_ot_in = timezone.make_aware(
+        datetime.combine(record_date, ot_in_t),
+        timezone.get_current_timezone(),
+    ) if ot_in_t else None
+    dt_ot_out = timezone.make_aware(
+        datetime.combine(record_date, ot_out_t),
+        timezone.get_current_timezone(),
+    ) if ot_out_t else None
+
+    shift_start_dt = timezone.make_aware(
+        datetime.combine(record_date, shift_start_t),
+        timezone.get_current_timezone(),
+    )
+    shift_end_dt = timezone.make_aware(
+        datetime.combine(record_date, shift_end_t),
+        timezone.get_current_timezone(),
+    )
+
+    if dt_am_in and not dt_pm_out and dt_am_out and dt_am_out.time().hour >= 13:
+        dt_pm_out = dt_am_out
+        dt_am_out = None
+
+    # 2. Tardiness calculation
+    tardiness_mins = 0
+    if dt_am_in:
+        grace_limit = shift_start_dt + timedelta(minutes=grace_mins)
+        if dt_am_in > grace_limit:
+            tardiness_mins = int((dt_am_in - shift_start_dt).total_seconds() / 60)
+
+    # 3. Regular Work hours calculation (effective shift start/end cap for non-flexible shifts)
+    effective_am_in = dt_am_in
+    if dt_am_in and shift_start_dt and dt_am_in < shift_start_dt and not (shift and shift.is_flexible):
+        effective_am_in = shift_start_dt
+
+    effective_pm_out = dt_pm_out
+    if dt_pm_out and shift_end_dt and dt_pm_out > shift_end_dt and not (shift and shift.is_flexible):
+        effective_pm_out = shift_end_dt
+
+    worked_mins = 0
+    if effective_am_in and effective_pm_out and effective_pm_out > effective_am_in:
+        total_span = (effective_pm_out - effective_am_in).total_seconds() / 60
+        if dt_am_out and dt_pm_in and dt_pm_in > dt_am_out:
+            break_span = (dt_pm_in - dt_am_out).total_seconds() / 60
+            worked_mins = max(0, total_span - break_span)
+        else:
+            if total_span >= 300:
+                worked_mins = max(0, total_span - 60)
+            else:
+                worked_mins = total_span
+    elif effective_am_in and dt_am_out and dt_am_out > effective_am_in:
+        worked_mins = (dt_am_out - effective_am_in).total_seconds() / 60
+    elif dt_pm_in and effective_pm_out and effective_pm_out > dt_pm_in:
+        worked_mins = (effective_pm_out - dt_pm_in).total_seconds() / 60
+
+    required_hours = shift.work_hours if shift else Decimal('8.00')
+    actual_hours = round(Decimal(worked_mins) / Decimal(60), 2)
+    actual_hours = min(actual_hours, required_hours)
+
+    # 4. Early Leave (Undertime) & Overtime calculation
+    early_leave_mins = 0
+    if dt_pm_out and shift_end_dt and dt_pm_out < shift_end_dt and not (shift and shift.is_flexible):
+        early_leave_mins = max(0, int((shift_end_dt - dt_pm_out).total_seconds() / 60))
+
+    ot_mins = 0
+    if dt_ot_in and dt_ot_out and dt_ot_out > dt_ot_in:
+        ot_mins = int((dt_ot_out - dt_ot_in).total_seconds() / 60)
+    elif dt_pm_out and shift_end_dt and dt_pm_out > shift_end_dt:
+        ot_mins = int((dt_pm_out - shift_end_dt).total_seconds() / 60)
+
+    # 5. Status & Anomaly Determination
+    status = 'PRESENT'
+    is_abnormal = False
+    is_absent = False
+    anomaly_reason = None
+
+    if not dt_am_in and not dt_pm_out:
+        status = 'ABSENT'
+        is_absent = True
+        is_abnormal = True
+        actual_hours = Decimal('0.00')
+        anomaly_reason = 'Unexcused absence / no biometric clocking'
+    elif not dt_am_in and dt_pm_out:
+        status = 'PRESENT'
+        is_abnormal = True
+        anomaly_reason = 'Missing AM clock-in punch'
+    elif dt_am_in and not dt_pm_out:
+        status = 'PRESENT'
+        is_abnormal = True
+        anomaly_reason = 'Missing PM clock-out punch'
+    elif tardiness_mins > 0 and early_leave_mins > 0:
+        status = 'LATE'
+        is_abnormal = True
+        anomaly_reason = f"Late arrival ({tardiness_mins} mins) & early departure ({early_leave_mins} mins)"
+    elif tardiness_mins > 0:
+        status = 'LATE'
+        is_abnormal = True
+        anomaly_reason = f"Late arrival ({tardiness_mins} mins)"
+    elif early_leave_mins > 0:
+        status = 'PRESENT'
+        is_abnormal = True
+        anomaly_reason = f"Early departure ({early_leave_mins} mins)"
+    elif actual_hours < (required_hours / Decimal(2)):
+        status = 'HALF_DAY'
+        is_abnormal = True
+        anomaly_reason = f"Half day rendered ({actual_hours} hrs)"
+
+    return {
+        'am_in': dt_am_in,
+        'am_out': dt_am_out,
+        'pm_in': dt_pm_in,
+        'pm_out': dt_pm_out,
+        'overtime_in': dt_ot_in,
+        'overtime_out': dt_ot_out,
+        'actual_hours': actual_hours,
+        'required_hours': required_hours,
+        'tardiness_minutes': tardiness_mins,
+        'tardiness_count': 1 if tardiness_mins > 0 else 0,
+        'early_leave_minutes': early_leave_mins,
+        'early_leave_count': 1 if early_leave_mins > 0 else 0,
+        'overtime_regular_minutes': ot_mins,
+        'status': status,
+        'is_absent': is_absent,
+        'is_abnormal': is_abnormal,
+        'anomaly_reason': anomaly_reason,
+    }
+
+
+def process_biometric_import(file_obj, file_name, user_identifier='SYSTEM'):
+    raw_records = extract_rows_from_file(file_obj, file_name)
+    if not raw_records:
+        return {
+            'success': False,
+            'message': 'No valid biometric timecard rows could be parsed from the file.',
+            'records_imported': 0,
+        }
+
+    dates = [r['date'] for r in raw_records if r.get('date')]
+    period_start = min(dates) if dates else timezone.now().date()
+    period_end = max(dates) if dates else timezone.now().date()
+
+    with transaction.atomic():
+        file_bio_ids = {
+            r['biometric_id'] for r in raw_records if r.get('biometric_id')
+        }
+        revoked_external_ids = set(
+            BiometricEnrollment.objects
+            .filter(status='REVOKED', external_biometric_id__in=file_bio_ids)
+            .values_list('external_biometric_id', flat=True)
+        )
+
+        batch = BiometricImportBatch.objects.create(
+            file_name=file_name,
+            period_start=period_start,
+            period_end=period_end,
+            records_imported=0,
+            anomalies_detected=0,
+            newly_created_accounts_count=0
+        )
+
+        records_imported = 0
+        anomalies_detected = 0
+        new_persons_created = 0
+        ojt_diffs_by_person = {}
+        imported_logs = []
+
+        default_shift = Shift.objects.filter(code='DAY', is_archived=False).first()
+
+        for raw in raw_records:
+            bio_id = raw.get('biometric_id')
+            rec_date = raw.get('date')
+            if not rec_date:
+                continue
+
+            person = None
+            is_revoked = bool(bio_id and bio_id in revoked_external_ids)
+            if is_revoked:
+                continue
+
+            if bio_id:
+                person = Person.objects.filter(biometric_id=bio_id, is_archived=False).first()
+
+            if not person and raw.get('name'):
+                person = Person.objects.filter(name__iexact=raw['name'], is_archived=False).first()
+                if person and not person.biometric_id and bio_id:
+                    person.biometric_id = bio_id
+                    person.save(update_fields=['biometric_id'])
+                    BiometricEnrollment.objects.create(
+                        person=person,
+                        external_biometric_id=bio_id,
+                        device_id='',
+                        device_name='Biometric import',
+                        enrolled_by=None,
+                        status='ENROLLED',
+                        is_active=True,
+                    )
+
+            if not person:
+                person = Person.objects.create(
+                    biometric_id=bio_id,
+                    name=raw.get('name') or f"Biometric #{bio_id}",
+                    person_type='EMPLOYEE',
+                    employment_mode='FULL_TIME',
+                    rate_type='DAILY',
+                    base_rate=0.00,
+                    status='ACTIVE',
+                    is_newly_imported=True,
+                    date_started=rec_date
+                )
+                new_persons_created += 1
+                if bio_id:
+                    BiometricEnrollment.objects.create(
+                        person=person,
+                        external_biometric_id=bio_id,
+                        device_id='',
+                        device_name='Biometric import',
+                        enrolled_by=None,
+                        status='ENROLLED',
+                        is_active=True,
+                    )
+
+            schedule = Schedule.objects.filter(person=person, date=rec_date, is_archived=False).first()
+            shift = schedule.shift if schedule and schedule.shift else default_shift
+
+            existing_record = AttendanceRecord.objects.filter(person=person, date=rec_date).first()
+            if existing_record and existing_record.is_locked:
+                continue
+            old_hours = existing_record.actual_hours if existing_record else Decimal('0.00')
+
+            # A device may export one row per punch. Preserve fields already
+            # loaded for the same employee/date while adding the next punch.
+            am_in_t = raw.get('am_in') or (existing_record.am_in.time() if existing_record and existing_record.am_in else None)
+            am_out_t = raw.get('am_out') or (existing_record.am_out.time() if existing_record and existing_record.am_out else None)
+            pm_in_t = raw.get('pm_in') or (existing_record.pm_in.time() if existing_record and existing_record.pm_in else None)
+            pm_out_t = raw.get('pm_out') or (existing_record.pm_out.time() if existing_record and existing_record.pm_out else None)
+
+            computed = compute_daily_attendance(
+                person=person,
+                record_date=rec_date,
+                am_in_t=am_in_t,
+                am_out_t=am_out_t,
+                pm_in_t=pm_in_t,
+                pm_out_t=pm_out_t,
+                ot_in_t=raw.get('overtime_in'),
+                ot_out_t=raw.get('overtime_out'),
+                shift=shift
+            )
+
+            # PATCH 11: prefer device-provided tardiness/early-leave annotations
+            device_tardiness = raw.get('_tardiness_minutes')
+            device_early_leave = raw.get('_early_leave_minutes')
+            if device_tardiness is not None:
+                computed['tardiness_minutes'] = int(device_tardiness)
+                computed['tardiness_count'] = 1 if device_tardiness > 0 else 0
+            if device_early_leave is not None:
+                computed['early_leave_minutes'] = int(device_early_leave)
+                computed['early_leave_count'] = 1 if device_early_leave > 0 else 0
+
+            att_record, _ = AttendanceRecord.objects.update_or_create(
+                person=person,
+                date=rec_date,
+                defaults={
+                    'am_in': computed['am_in'],
+                    'am_out': computed['am_out'],
+                    'pm_in': computed['pm_in'],
+                    'pm_out': computed['pm_out'],
+                    'overtime_in': computed['overtime_in'],
+                    'overtime_out': computed['overtime_out'],
+                    'actual_hours': computed['actual_hours'],
+                    'required_hours': computed['required_hours'],
+                    'tardiness_minutes': computed['tardiness_minutes'],
+                    'tardiness_count': computed['tardiness_count'],
+                    'early_leave_minutes': computed['early_leave_minutes'],
+                    'early_leave_count': computed['early_leave_count'],
+                    'overtime_regular_minutes': computed['overtime_regular_minutes'],
+                    'status': computed['status'],
+                    'is_absent': computed['is_absent'],
+                    'is_abnormal': computed['is_abnormal'],
+                    'batch': batch,
+                    'is_archived': False
+                }
+            )
+            records_imported += 1
+            imported_logs.append({
+                'id': str(att_record.id),
+                'person_id': str(person.id),
+                'person_name': person.name,
+                'person_type': person.person_type,
+                'biometric_id': bio_id or person.biometric_id or '',
+                'date': rec_date.isoformat(),
+                'am_in': att_record.am_in.isoformat() if att_record.am_in else '',
+                'am_out': att_record.am_out.isoformat() if att_record.am_out else '',
+                'pm_in': att_record.pm_in.isoformat() if att_record.pm_in else '',
+                'pm_out': att_record.pm_out.isoformat() if att_record.pm_out else '',
+                'actual_hours': float(att_record.actual_hours or 0),
+                'tardiness_minutes': int(att_record.tardiness_minutes or 0),
+                'status': att_record.status,
+                'is_abnormal': att_record.is_abnormal,
+                'batch_id': str(batch.id),
+            })
+
+            hour_diff = computed['actual_hours'] - old_hours
+            if hour_diff != 0 and person.person_type == 'OJT':
+                ojt_diffs_by_person[person.id] = ojt_diffs_by_person.get(person.id, Decimal('0.00')) + hour_diff
+
+            if computed['am_in']:
+                BiometricLog.objects.create(
+                    person=person,
+                    biometric_id=bio_id or str(person.id),
+                    timestamp=computed['am_in'],
+                    log_type='CHECK_IN',
+                    batch=batch
+                )
+            if computed['pm_out']:
+                BiometricLog.objects.create(
+                    person=person,
+                    biometric_id=bio_id or str(person.id),
+                    timestamp=computed['pm_out'],
+                    log_type='CHECK_OUT',
+                    batch=batch
+                )
+
+            if computed['is_abnormal']:
+                anomalies_detected += 1
+                am_in_str = computed['am_in'].strftime('%H:%M') if computed['am_in'] else None
+                am_out_str = computed['am_out'].strftime('%H:%M') if computed['am_out'] else None
+                pm_in_str = computed['pm_in'].strftime('%H:%M') if computed['pm_in'] else None
+                pm_out_str = computed['pm_out'].strftime('%H:%M') if computed['pm_out'] else None
+
+                AbnormalClocking.objects.update_or_create(
+                    attendance_record=att_record,
+                    defaults={
+                        'person': person,
+                        'date': rec_date,
+                        'am_in': am_in_str,
+                        'am_out': am_out_str,
+                        'pm_in': pm_in_str,
+                        'pm_out': pm_out_str,
+                        'tardiness_minutes': computed['tardiness_minutes'],
+                        'early_leave_minutes': computed['early_leave_minutes'],
+                        'total_abnormal_minutes': computed['tardiness_minutes'] + computed['early_leave_minutes'],
+                        'reason': computed.get('anomaly_reason') or 'Biometric anomaly detected',
+                        'status': 'PENDING'
+                    }
+                )
+            else:
+                # If existing exception was pending but record is now normal, resolve it
+                AbnormalClocking.objects.filter(attendance_record=att_record, status='PENDING').update(
+                    status='RESOLVED',
+                    reason='Auto-resolved by biometric log update'
+                )
+
+        for p_id, diff in ojt_diffs_by_person.items():
+            p = Person.objects.filter(id=p_id).first()
+            if p:
+                current_rendered = p.rendered_ojt_hours or Decimal('0.00')
+                p.rendered_ojt_hours = max(Decimal('0.00'), current_rendered + diff)
+                p.save(update_fields=['rendered_ojt_hours'])
+
+        batch.records_imported = records_imported
+        batch.anomalies_detected = anomalies_detected
+        batch.newly_created_accounts_count = new_persons_created
+        batch.save()
+
+    return {
+        'success': True,
+        'batch_id': str(batch.id),
+        'file_name': file_name,
+        'records_imported': records_imported,
+        'logs': imported_logs,
+        'anomalies_detected': anomalies_detected,
+        'newly_created_accounts_count': new_persons_created,
+        'period_start': period_start.isoformat(),
+        'period_end': period_end.isoformat(),
+        'message': f"Successfully processed {file_name}: {records_imported} attendance records imported ({new_persons_created} new accounts, {anomalies_detected} anomalies)."
+    }
