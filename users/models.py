@@ -153,21 +153,10 @@ class User(AbstractBaseUser, PermissionsMixin, BaseModel):
         if self.role and self.role.code == 'SUPER_ADMIN':
             raise ValidationError("The Super Admin account cannot be archived.")
         super().archive(user_identifier=user_identifier)
-        try:
-            person = getattr(self, 'person', None) or Person.objects.filter(user=self).first()
-            if person and not person.is_archived:
-                person.archive(user_identifier=user_identifier)
-        except Exception:
-            pass
 
     def restore(self):
         super().restore()
-        try:
-            person = getattr(self, 'person', None) or Person.objects.filter(user=self).first()
-            if person and person.is_archived:
-                person.restore()
-        except Exception:
-            pass
+
 
 
 class Person(BaseModel):
@@ -411,3 +400,22 @@ class NotificationPreference(BaseModel):
 
     def __str__(self):
         return f"Preferences for {self.user.username}"
+
+
+class RegistrationSetting(BaseModel):
+    """
+    Global system registration toggle governing public self-registration.
+    Stored in database for immediate effect without restart.
+    """
+    is_self_registration_enabled = models.BooleanField(default=True)
+
+    class Meta:
+        db_table = 'registration_settings'
+
+    @classmethod
+    def get_setting(cls):
+        obj = cls.objects.first()
+        if not obj:
+            obj = cls.objects.create(is_self_registration_enabled=True)
+        return obj
+

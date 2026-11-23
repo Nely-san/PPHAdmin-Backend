@@ -23,7 +23,7 @@ from users.views import user_has_module_permission
 class HasBiometricUploadPermission(permissions.BasePermission):
     """
     RBAC permission for biometric upload endpoint.
-    Requires 'attendance:biometrics' edit/add permission or management role.
+    Requires 'attendance:biometrics' view/edit permission or Superadmin.
     """
     def has_permission(self, request, view):
         if not request.user or not request.user.is_authenticated:
@@ -33,13 +33,11 @@ class HasBiometricUploadPermission(permissions.BasePermission):
                 request.user,
                 'attendance:biometrics',
                 action='view',
-                allowed_role_codes=['ADMIN', 'HR_ADMIN', 'HR_MANAGER']
             )
         return user_has_module_permission(
             request.user,
             'attendance:biometrics',
             action='edit',
-            allowed_role_codes=['ADMIN', 'HR_ADMIN', 'HR_MANAGER']
         )
 
 class BiometricImportViewSet(viewsets.ModelViewSet):
@@ -295,13 +293,11 @@ class HasAttendanceExceptionPermission(permissions.BasePermission):
                 request.user,
                 'attendance:exceptions',
                 action='view',
-                allowed_role_codes=['ADMIN', 'HR_ADMIN', 'HR_MANAGER']
             )
         return user_has_module_permission(
             request.user,
             'attendance:exceptions',
             action='edit',
-            allowed_role_codes=['ADMIN', 'HR_ADMIN', 'HR_MANAGER']
         )
 
     def has_object_permission(self, request, view, obj):
@@ -312,7 +308,6 @@ class HasAttendanceExceptionPermission(permissions.BasePermission):
                 request.user,
                 'attendance:exceptions',
                 action='edit',
-                allowed_role_codes=['ADMIN', 'HR_ADMIN', 'HR_MANAGER']
             ):
                 return True
             # Otherwise, check if target record belongs to caller's own Person record
@@ -328,13 +323,11 @@ class HasAttendanceExceptionPermission(permissions.BasePermission):
                 request.user,
                 'attendance:exceptions',
                 action='view',
-                allowed_role_codes=['ADMIN', 'HR_ADMIN', 'HR_MANAGER']
             )
         return user_has_module_permission(
             request.user,
             'attendance:exceptions',
             action='edit',
-            allowed_role_codes=['ADMIN', 'HR_ADMIN', 'HR_MANAGER']
         )
 
 

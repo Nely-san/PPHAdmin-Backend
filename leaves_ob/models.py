@@ -10,6 +10,8 @@ class LeaveOBApplication(BaseModel):
         ('SICK_LEAVE', 'Sick Leave (SL)'),
         ('EMERGENCY_LEAVE', 'Emergency Leave (EL)'),
         ('OFFICIAL_BUSINESS', 'Official Business Trip (OB)'),
+        ('MATERNITY_PATERNITY', 'Maternity / Paternity Leave'),
+        ('UNDERTIME_PASS', 'Undertime Pass Slip'),
     ]
     STATUS_CHOICES = [
         ('PENDING', 'Pending HR Review'),

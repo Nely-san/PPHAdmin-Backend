@@ -212,6 +212,8 @@ class PersonProfileReadOnlySerializer(serializers.ModelSerializer):
 
 
 class PersonProfileAdminWriteSerializer(serializers.ModelSerializer):
+    character_references = CharacterReferenceSelfServiceSerializer(many=True, required=False)
+
     class Meta:
         model = PersonProfile
         fields = [
@@ -222,6 +224,18 @@ class PersonProfileAdminWriteSerializer(serializers.ModelSerializer):
             'gender',
             'civil_status',
             'tin_number',
+            'house_number',
+            'street',
+            'barangay',
+            'city_municipality',
+            'province_region',
+            'zip_code',
+            'landline',
+            'mobile_number',
+            'highest_education_attainment',
+            'course',
+            'education_school',
+            'year_graduated',
             'property_status',
             'accreditation_date',
             'current_position',
@@ -235,11 +249,57 @@ class PersonProfileAdminWriteSerializer(serializers.ModelSerializer):
             'executive_partner',
             'team_director',
             'division_broker',
+            'character_references',
         ]
         extra_kwargs = {field: {
             'required': False,
             'allow_null': True,
-        } for field in fields}
+        } for field in fields if field != 'character_references'}
+
+    def validate_character_references(self, value):
+        if len(value) > 5:
+            raise serializers.ValidationError(
+                'A person profile may have at most 5 character references.'
+            )
+        return value
+
+    def update(self, instance, validated_data):
+        references_data = validated_data.pop('character_references', None)
+
+        for field, value in validated_data.items():
+            setattr(instance, field, value)
+        instance.save()
+
+        if references_data is not None:
+            submitted_ids = set()
+            for reference_data in references_data:
+                reference_id = reference_data.get('id')
+                if reference_id:
+                    reference = instance.character_references.filter(
+                        id=reference_id,
+                        is_archived=False,
+                    ).first()
+                    if reference is not None:
+                        for field, value in reference_data.items():
+                            setattr(reference, field, value)
+                        reference.save()
+                        submitted_ids.add(reference.id)
+                else:
+                    reference = CharacterReference(
+                        person_profile=instance,
+                        **reference_data,
+                    )
+                    reference.full_clean(
+                        exclude=['id', 'created_at', 'updated_at', 'archived_at', 'archived_by']
+                    )
+                    reference.save()
+                    submitted_ids.add(reference.id)
+
+            instance.character_references.filter(is_archived=False).exclude(
+                id__in=submitted_ids
+            ).delete()
+
+        return instance
 
 
 
@@ -362,16 +422,6 @@ class PersonDetailAdminWriteSerializer(PersonDetailSerializer):
     date_started = serializers.DateField(required=False, allow_null=True)
 
     def to_internal_value(self, data):
-        profile_data = data.get('profile')
-        if isinstance(profile_data, dict):
-            allowed_fields = set(PersonProfileAdminWriteSerializer.Meta.fields)
-            unsupported_fields = set(profile_data.keys()) - allowed_fields
-            if unsupported_fields:
-                raise serializers.ValidationError({
-                    'profile': [
-                        f"Unsupported or self-service-owned fields: {', '.join(sorted(unsupported_fields))}"
-                    ]
-                })
         return super().to_internal_value(data)
 
     def update(self, instance, validated_data):
@@ -379,9 +429,9 @@ class PersonDetailAdminWriteSerializer(PersonDetailSerializer):
         instance = super().update(instance, validated_data)
         if profile_data is not None:
             profile, _ = PersonProfile.objects.get_or_create(person=instance)
-            for field, value in profile_data.items():
-                setattr(profile, field, value)
-            profile.save(update_fields=list(profile_data.keys()))
+            profile_serializer = PersonProfileAdminWriteSerializer(profile, data=profile_data, partial=True)
+            if profile_serializer.is_valid(raise_exception=True):
+                profile_serializer.save()
         return instance
 
 
@@ -399,6 +449,7 @@ class UserProfileSerializer(serializers.ModelSerializer):
     person = serializers.SerializerMethodField()
     password = serializers.CharField(write_only=True, required=False)
     custom_permissions = PagePermissionSerializer(many=True, read_only=True)
+    page_codes = serializers.ListField(child=serializers.CharField(), write_only=True, required=False)
     approved_by_username = serializers.CharField(source='approved_by.username', read_only=True)
     school_name = serializers.CharField(write_only=True, required=False, allow_null=True, allow_blank=True)
     schoolName = serializers.CharField(write_only=True, required=False, allow_null=True, allow_blank=True)
@@ -410,7 +461,7 @@ class UserProfileSerializer(serializers.ModelSerializer):
             'id', 'username', 'email', 'role', 'role_detail', 'allowed_pages', 'navigation',
             'role_code', 'role_id', 'person', 'password', 'is_active', 'is_staff', 
             'approval_status', 'rejection_reason', 'approved_by', 'approved_by_username',
-            'approved_at', 'custom_permissions', 'is_archived', 'created_at',
+            'approved_at', 'custom_permissions', 'page_codes', 'is_archived', 'created_at',
             'school_name', 'schoolName', 'biometrics', 'date_joined'
         ]
 
@@ -439,7 +490,7 @@ class UserProfileSerializer(serializers.ModelSerializer):
         }
 
     def get_role(self, obj):
-        return obj.role.code if obj.role else 'EMPLOYEE'
+        return obj.role.code if obj.role else 'ADMIN'
 
     def get_allowed_pages(self, obj):
         if not obj.role:
@@ -471,6 +522,18 @@ class UserProfileSerializer(serializers.ModelSerializer):
         if 'isActive' in mapped_data and 'is_active' not in mapped_data:
             mapped_data['is_active'] = mapped_data['isActive']
         ret = super().to_internal_value(mapped_data)
+        if 'page_codes' in mapped_data:
+            ret['page_codes'] = mapped_data['page_codes']
+        elif 'custom_permissions' in mapped_data and isinstance(mapped_data['custom_permissions'], list):
+            ret['page_codes'] = [
+                item if isinstance(item, str) else item.get('code')
+                for item in mapped_data['custom_permissions'] if item
+            ]
+        elif 'customPermissions' in mapped_data and isinstance(mapped_data['customPermissions'], list):
+            ret['page_codes'] = [
+                item if isinstance(item, str) else item.get('code')
+                for item in mapped_data['customPermissions'] if item
+            ]
         if 'role' in data and 'role_code' not in ret and 'role' not in ret:
             ret['role_code'] = data['role']
         if 'schoolName' in data and 'school_name' not in ret:
@@ -499,6 +562,7 @@ class UserProfileSerializer(serializers.ModelSerializer):
     def create(self, validated_data):
         password = validated_data.pop('password', None)
         role_code = validated_data.pop('role_code', None)
+        page_codes = validated_data.pop('page_codes', None)
         school_name = validated_data.pop('school_name', None)
         if school_name is None:
             school_name = validated_data.pop('schoolName', None)
@@ -517,6 +581,10 @@ class UserProfileSerializer(serializers.ModelSerializer):
         if password:
             user.set_password(password)
             user.save()
+
+        if page_codes is not None:
+            perms = PagePermission.objects.filter(code__in=page_codes)
+            user.custom_permissions.set(perms)
 
         if person_id:
             try:
@@ -560,6 +628,7 @@ class UserProfileSerializer(serializers.ModelSerializer):
     def update(self, instance, validated_data):
         password = validated_data.pop('password', None)
         role_code = validated_data.pop('role_code', None)
+        page_codes = validated_data.pop('page_codes', None)
         school_name = validated_data.pop('school_name', None)
         if school_name is None:
             school_name = validated_data.pop('schoolName', None)
@@ -588,16 +657,11 @@ class UserProfileSerializer(serializers.ModelSerializer):
             instance.set_password(password)
         instance.save()
 
-        if is_archived_val is not None:
-            try:
-                person = getattr(instance, 'person', None) or Person.objects.filter(user=instance).first()
-                if person:
-                    if is_archived_val and not person.is_archived:
-                        person.archive(user_identifier=instance.archived_by)
-                    elif not is_archived_val and person.is_archived:
-                        person.restore()
-            except Exception:
-                pass
+        if page_codes is not None:
+            perms = PagePermission.objects.filter(code__in=page_codes)
+            instance.custom_permissions.set(perms)
+
+        # Zero cascade: user archival/deactivation NEVER archives the linked Person!
 
         if school_name is not None:
             try:
@@ -745,12 +809,12 @@ class RegisterSerializer(serializers.ModelSerializer):
         email = validated_data['email'].strip().lower()
         password = validated_data['password']
 
-        employee_role = Role.objects.filter(code='EMPLOYEE').first()
+        admin_role = Role.objects.filter(code='ADMIN').first()
 
         user = User.objects.create(
             username=username,
             email=email,
-            role=employee_role,
+            role=admin_role,
             approval_status='PENDING',
             is_active=False,
             is_staff=False,

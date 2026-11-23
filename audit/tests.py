@@ -67,3 +67,15 @@ class AuditTests(APITestCase):
         archive_log = AuditLog.objects.filter(table_name='users', record_id=str(new_user.pk), action='ARCHIVE').first()
         self.assertIsNotNone(archive_log)
 
+    def test_request_id_middleware(self):
+        # 1. Automatic generation of X-Request-ID
+        res = self.client.get('/api/audit-logs/')
+        self.assertIn('X-Request-ID', res.headers)
+        self.assertTrue(len(res.headers['X-Request-ID']) > 0)
+
+        # 2. Preservation of custom X-Request-ID
+        custom_id = 'test-custom-req-id-12345'
+        res2 = self.client.get('/api/audit-logs/', HTTP_X_REQUEST_ID=custom_id)
+        self.assertEqual(res2.headers.get('X-Request-ID'), custom_id)
+
+

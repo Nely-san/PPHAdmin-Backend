@@ -9,6 +9,8 @@ from scheduling.models import Schedule
 class LeavesOBTests(APITestCase):
     def setUp(self):
         self.role, _ = Role.objects.get_or_create(code='HR_ADMIN', defaults={'name': 'HR Admin'})
+        perm, _ = PagePermission.objects.get_or_create(code='attendance:leaves', defaults={'name': 'Attendance Leaves', 'module': 'HR'})
+        self.role.permissions.add(perm)
         self.user = User.objects.create_user(username='leave_approver', password='password123', role=self.role)
         self.client.force_authenticate(user=self.user)
 

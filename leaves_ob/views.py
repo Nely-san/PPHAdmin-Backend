@@ -17,14 +17,13 @@ from users.views import user_has_module_permission
 class HasLeaveApprovalPermission(permissions.BasePermission):
     """
     RBAC permission for Leave & OB applications approval/rejection.
-    Requires 'attendance:leaves:edit' (or parent module) or SUPER_ADMIN/HR management role.
+    Requires 'attendance:leaves:edit' (or parent module) or Superadmin.
     """
     def has_permission(self, request, view):
         return user_has_module_permission(
             request.user,
             'attendance:leaves',
             action='edit',
-            allowed_role_codes=['ADMIN', 'HR_ADMIN', 'HR_MANAGER']
         )
 
 
@@ -73,10 +72,15 @@ class LeaveOBViewSet(viewsets.ModelViewSet):
     def perform_create(self, serializer):
         # Auto-link person if not explicitly passed and user has linked person
         person = serializer.validated_data.get('person')
-        if not person and hasattr(self.request.user, 'person'):
-            serializer.save(person=self.request.user.person)
-        else:
-            serializer.save()
+        if not person:
+            person = getattr(self.request.user, 'person', None)
+            if not person:
+                from users.models import Person
+                person = Person.objects.filter(user=self.request.user).first() or Person.objects.filter(name__iexact=self.request.user.username).first()
+            if person:
+                serializer.save(person=person)
+                return
+        serializer.save()
 
     @action(detail=False, methods=['get'], url_path='my-leaves')
     def my_leaves(self, request):
@@ -183,10 +187,15 @@ class OvertimeApplicationViewSet(viewsets.ModelViewSet):
     def perform_create(self, serializer):
         # Auto-link person if not explicitly passed and user has linked person
         person = serializer.validated_data.get('person')
-        if not person and hasattr(self.request.user, 'person'):
-            serializer.save(person=self.request.user.person)
-        else:
-            serializer.save()
+        if not person:
+            person = getattr(self.request.user, 'person', None)
+            if not person:
+                from users.models import Person
+                person = Person.objects.filter(user=self.request.user).first() or Person.objects.filter(name__iexact=self.request.user.username).first()
+            if person:
+                serializer.save(person=person)
+                return
+        serializer.save()
 
     @action(detail=False, methods=['get'], url_path='my-overtime')
     def my_overtime(self, request):

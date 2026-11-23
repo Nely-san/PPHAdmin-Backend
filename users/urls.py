@@ -20,6 +20,8 @@ urlpatterns = [
     path('auth/token/refresh/', TokenRefreshView.as_view(), name='auth_token_refresh'),
 
     # Resource routers (users, persons)
+    path('users/registration-toggle/', registration_toggle_view, name='registration_toggle'),
+    path('users/registration-toggle', registration_toggle_view, name='registration_toggle_no_slash'),
     path('', include(router.urls)),
 
     # Notification endpoints

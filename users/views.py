@@ -32,6 +32,7 @@ from users.models import (
     PagePermission,
     Notification,
     NotificationPreference,
+    RegistrationSetting,
 )
 from users.serializers import (
     UserProfileSerializer,
@@ -63,7 +64,6 @@ def user_has_module_permission(user, module_code, action='edit', allowed_role_co
     Evaluates whether an authenticated user has permission to access or perform
     an action on a given system module.
     - Super Admins have unrestricted access.
-    - Specific allowed role codes (e.g. 'ADMIN', 'HR_ADMIN') are granted access.
     - Dynamic module codes from role.permissions and custom_permissions are evaluated.
     """
     if not user or not user.is_authenticated:
@@ -71,9 +71,6 @@ def user_has_module_permission(user, module_code, action='edit', allowed_role_co
 
     user_role_code = user.role.code if user.role else ''
     if user_role_code == 'SUPER_ADMIN' or getattr(user, 'is_superuser', False):
-        return True
-
-    if allowed_role_codes and user_role_code in allowed_role_codes:
         return True
 
     role_codes = set()
@@ -102,42 +99,39 @@ def user_has_module_permission(user, module_code, action='edit', allowed_role_co
 class HasUserManagementViewPermission(permissions.BasePermission):
     """
     Enforces authorization for User viewing endpoints (e.g. pending-approvals).
-    Requires 'user-management:view' (or 'user-management') permission or SUPER_ADMIN / ADMIN role.
+    Requires 'user-management:view' (or 'user-management') permission or SUPER_ADMIN.
     """
     def has_permission(self, request, view):
         return user_has_module_permission(
             request.user,
             'user-management',
             action='view',
-            allowed_role_codes=['ADMIN']
         )
 
 
 class HasUserManagementEditPermission(permissions.BasePermission):
     """
     Enforces authorization for User approval and rejection endpoints.
-    Requires 'user-management:edit' (or 'user-management') permission or SUPER_ADMIN / ADMIN role.
+    Requires 'user-management:edit' (or 'user-management') permission or SUPER_ADMIN.
     """
     def has_permission(self, request, view):
         return user_has_module_permission(
             request.user,
             'user-management',
             action='edit',
-            allowed_role_codes=['ADMIN']
         )
 
 
 class HasUserManagementDeletePermission(permissions.BasePermission):
     """
     Enforces authorization for User archiving and deletion endpoints.
-    Requires 'user-management:delete' (or 'user-management') permission or SUPER_ADMIN / ADMIN role.
+    Requires 'user-management:delete' (or 'user-management') permission or SUPER_ADMIN.
     """
     def has_permission(self, request, view):
         return user_has_module_permission(
             request.user,
             'user-management',
             action='delete',
-            allowed_role_codes=['ADMIN']
         )
 
 
@@ -156,6 +150,9 @@ class UserViewSet(viewsets.ModelViewSet):
         # For detail actions (approve, reject, archive, unarchive, retrieve, update, etc.), do not restrict queryset by list filters
         if self.action and self.action not in ['list', 'pending_approvals']:
             return qs
+
+        # User Management shows Admin and staff accounts only; employees/OJTs are data-only Person records
+        qs = qs.exclude(role__code__in=['EMPLOYEE', 'OJT'])
 
         include_archived = self.request.query_params.get('include_archived', 'false').lower() == 'true'
         include_pending = self.request.query_params.get('include_pending', 'false').lower() == 'true'
@@ -194,10 +191,11 @@ class UserViewSet(viewsets.ModelViewSet):
         user = self.get_object()
         if user.role and user.role.code == 'SUPER_ADMIN':
             return Response(
-                {"detail": "The Super Admin account is permanent and cannot be deleted or archived."},
+                {"detail": "The Super Admin account is permanent and cannot be deleted or deactivated."},
                 status=status.HTTP_400_BAD_REQUEST
             )
-        user.archive(user_identifier=request.user.username)
+        user.is_active = False
+        user.save(update_fields=['is_active'])
         return Response(status=status.HTTP_204_NO_CONTENT)
 
     @action(detail=True, methods=['post'], url_path='archive', permission_classes=[permissions.IsAuthenticated, HasUserManagementDeletePermission])
@@ -205,16 +203,37 @@ class UserViewSet(viewsets.ModelViewSet):
         user = self.get_object()
         if user.role and user.role.code == 'SUPER_ADMIN':
             return Response(
-                {"detail": "The Super Admin account cannot be archived."},
+                {"detail": "The Super Admin account cannot be deactivated."},
                 status=status.HTTP_400_BAD_REQUEST
             )
-        user.archive(user_identifier=request.user.username)
+        user.is_active = False
+        user.save(update_fields=['is_active'])
+        return Response(self.get_serializer(user).data)
+
+    @action(detail=True, methods=['post'], url_path='deactivate', permission_classes=[permissions.IsAuthenticated, HasUserManagementEditPermission])
+    def deactivate_user(self, request, pk=None):
+        user = self.get_object()
+        if user.role and user.role.code == 'SUPER_ADMIN':
+            return Response(
+                {"detail": "The Super Admin account cannot be deactivated."},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        user.is_active = False
+        user.save(update_fields=['is_active'])
         return Response(self.get_serializer(user).data)
 
     @action(detail=True, methods=['post'], url_path='unarchive', permission_classes=[permissions.IsAuthenticated, HasUserManagementEditPermission])
     def unarchive_user(self, request, pk=None):
         user = self.get_object()
-        user.restore()
+        user.is_active = True
+        user.save(update_fields=['is_active'])
+        return Response(self.get_serializer(user).data)
+
+    @action(detail=True, methods=['post'], url_path='activate', permission_classes=[permissions.IsAuthenticated, HasUserManagementEditPermission])
+    def activate_user(self, request, pk=None):
+        user = self.get_object()
+        user.is_active = True
+        user.save(update_fields=['is_active'])
         return Response(self.get_serializer(user).data)
 
     @action(detail=False, methods=['get'], url_path='pending-approvals', permission_classes=[permissions.IsAuthenticated, HasUserManagementViewPermission])
@@ -250,6 +269,9 @@ class UserViewSet(viewsets.ModelViewSet):
             role = Role.objects.filter(code=data['role_code'], is_archived=False).first()
 
         if not role:
+            role = Role.objects.filter(code='ADMIN', is_archived=False).first()
+
+        if not role:
             return Response({"role": "Valid role is required."}, status=status.HTTP_400_BAD_REQUEST)
 
         # Enforce single Super Admin safeguard
@@ -268,11 +290,14 @@ class UserViewSet(viewsets.ModelViewSet):
         user.approved_at = timezone.now()
         user.rejection_reason = None
 
-        # Assign custom page permissions if provided
+        # Assign custom page permissions if provided, else basic baseline permissions
         page_codes = data.get('page_codes')
-        if page_codes is not None:
+        if page_codes is not None and len(page_codes) > 0:
             pages = PagePermission.objects.filter(code__in=page_codes)
             user.custom_permissions.set(pages)
+        else:
+            basic_pages = PagePermission.objects.filter(code__in=['dashboard', 'calendar', 'profile'])
+            user.custom_permissions.set(basic_pages)
 
         user.save()
         return Response(
@@ -742,12 +767,31 @@ class PasswordResetConfirmView(APIView):
         return Response({'message': 'Password has been reset successfully. You may now log in with your new password.'}, status=status.HTTP_200_OK)
 
 
+@api_view(['GET', 'POST', 'PATCH'])
+@permission_classes([permissions.AllowAny])
+def registration_toggle_view(request):
+    """
+    Database toggle governing public self-registration.
+    GET is public. POST/PATCH requires user-management permission or Superadmin.
+    """
+    setting = RegistrationSetting.get_setting()
+    if request.method in ['POST', 'PATCH']:
+        if not request.user or not request.user.is_authenticated:
+            return Response({"detail": "Authentication required."}, status=status.HTTP_401_UNAUTHORIZED)
+        if not user_has_module_permission(request.user, 'user-management', action='edit'):
+            return Response({"detail": "Permission denied."}, status=status.HTTP_403_FORBIDDEN)
+        enabled = request.data.get('is_self_registration_enabled')
+        if enabled is not None:
+            setting.is_self_registration_enabled = bool(enabled)
+            setting.save()
+    return Response({'is_self_registration_enabled': setting.is_self_registration_enabled})
+
+
 @api_view(['POST'])
 @permission_classes([permissions.AllowAny])
 def register_view(request):
     """
     Public registration endpoint for new users.
-    Accepts username, email, and password.
     """
     serializer = RegisterSerializer(data=request.data)
     if serializer.is_valid():

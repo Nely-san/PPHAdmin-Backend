@@ -50,9 +50,9 @@ class RoleViewSet(viewsets.ModelViewSet):
 
     def destroy(self, request, *args, **kwargs):
         role = self.get_object()
-        if role.code == 'SUPER_ADMIN':
+        if role.code in ['SUPER_ADMIN', 'ADMIN'] or role.is_system_role:
             return Response(
-                {"detail": "The Super Admin role is permanent and cannot be deleted."},
+                {"detail": f"The built-in role '{role.name or role.code}' is permanent and cannot be deleted."},
                 status=status.HTTP_400_BAD_REQUEST
             )
         from users.models import User
