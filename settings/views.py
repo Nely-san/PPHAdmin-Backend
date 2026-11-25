@@ -8,6 +8,7 @@ from settings.serializers import (
     ModuleAccessSerializer, AuditLogSerializer
 )
 from users.models import Role, PagePermission
+from users.views import user_has_module_permission
 
 class RoleViewSet(viewsets.ModelViewSet):
     """
@@ -40,7 +41,28 @@ class RoleViewSet(viewsets.ModelViewSet):
         self.check_object_permissions(self.request, obj)
         return obj
 
+    def _caller_may_edit_roles(self, request):
+        if not request.user or not request.user.is_authenticated:
+            return False
+        if request.user.is_active is False or getattr(request.user, "is_archived", False):
+            return False
+        if getattr(request.user, "is_superuser", False):
+            return True
+        role = getattr(request.user, "role", None)
+        if role is None:
+            return False
+        if role.code == "SUPER_ADMIN":
+            return True
+        return user_has_module_permission(
+            request.user, "roles-permissions", action="edit"
+        )
+
     def update(self, request, *args, **kwargs):
+        if not self._caller_may_edit_roles(request):
+            return Response(
+                {"detail": "You do not have permission to edit roles."},
+                status=status.HTTP_403_FORBIDDEN,
+            )
         partial = kwargs.pop('partial', True)
         instance = self.get_object()
         serializer = self.get_serializer(instance, data=request.data, partial=partial)
@@ -48,7 +70,28 @@ class RoleViewSet(viewsets.ModelViewSet):
         self.perform_update(serializer)
         return Response(serializer.data)
 
+    def partial_update(self, request, *args, **kwargs):
+        if not self._caller_may_edit_roles(request):
+            return Response(
+                {"detail": "You do not have permission to edit roles."},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+        return super().partial_update(request, *args, **kwargs)
+
+    def create(self, request, *args, **kwargs):
+        if not self._caller_may_edit_roles(request):
+            return Response(
+                {"detail": "You do not have permission to create roles."},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+        return super().create(request, *args, **kwargs)
+
     def destroy(self, request, *args, **kwargs):
+        if not self._caller_may_edit_roles(request):
+            return Response(
+                {"detail": "You do not have permission to delete roles."},
+                status=status.HTTP_403_FORBIDDEN,
+            )
         role = self.get_object()
         if role.code in ['SUPER_ADMIN', 'ADMIN'] or role.is_system_role:
             return Response(
