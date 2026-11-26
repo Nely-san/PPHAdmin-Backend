@@ -52,10 +52,6 @@ from audit.signals import record_audit_log
 ROLE_ORDER_MAP = {
     'SUPER_ADMIN': 1,
     'ADMIN': 2,
-    'HR_MANAGER': 3,
-    'PAYROLL_OFFICER': 4,
-    'EMPLOYEE': 5,
-    'OJT': 6,
 }
 
 
@@ -113,12 +109,9 @@ class UserViewSet(viewsets.ModelViewSet):
 
     def get_queryset(self):
         qs = User.objects.all()
-        # For detail actions (approve, reject, archive, unarchive, retrieve, update, etc.), do not restrict queryset by list filters
+        # Detail actions do not restrict queryset by list filters
         if self.action and self.action not in ['list', 'pending_approvals']:
             return qs
-
-        # User Management shows Admin and staff accounts only; employees/OJTs are data-only Person records
-        qs = qs.exclude(role__code__in=['EMPLOYEE', 'OJT'])
 
         include_archived = self.request.query_params.get('include_archived', 'false').lower() == 'true'
         include_pending = self.request.query_params.get('include_pending', 'false').lower() == 'true'
@@ -1015,12 +1008,14 @@ class GoogleLoginView(APIView):
                 username = f"{base_username}{counter}"
                 counter += 1
 
-            employee_role = Role.objects.filter(code='EMPLOYEE').first()
+            admin_role = Role.objects.filter(code='ADMIN').first()
+            if not admin_role:
+                raise RuntimeError("Default role 'ADMIN' not found.")
 
             user = User.objects.create(
                 username=username,
                 email=email,
-                role=employee_role,
+                role=admin_role,
                 approval_status='PENDING',  # Account awaits admin review & approval
                 is_active=False,
                 is_staff=False,
@@ -1071,9 +1066,14 @@ class GoogleLoginView(APIView):
                 'error': 'Your account has been deactivated. Please contact an administrator.'
             }, status=status.HTTP_403_FORBIDDEN)
 
+        if user.role is None:
+            return Response({
+                'error': 'Account has no role. Contact SUPER_ADMIN.'
+            }, status=status.HTTP_401_UNAUTHORIZED)
+
         refresh = RefreshToken.for_user(user)
         refresh['username'] = user.username
-        refresh['role'] = user.role.code if user.role else 'EMPLOYEE'
+        refresh['role'] = user.role.code
 
         serializer = UserProfileSerializer(user)
 
