@@ -939,7 +939,8 @@ class AccountApprovalTests(TestCase):
         unprivileged_user = User.objects.create_user(
             username='viewer_denied',
             password='password123',
-            role=self.emp_role
+            role=self.emp_role,
+            is_active=True
         )
         self.client.force_authenticate(user=unprivileged_user)
         res_denied = self.client.get('/api/users/pending-approvals/')

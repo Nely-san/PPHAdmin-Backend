@@ -11,7 +11,7 @@ class LeavesOBTests(APITestCase):
         self.role, _ = Role.objects.get_or_create(code='HR_ADMIN', defaults={'name': 'HR Admin'})
         perm, _ = PagePermission.objects.get_or_create(code='attendance:leaves', defaults={'name': 'Attendance Leaves', 'module': 'HR'})
         self.role.permissions.add(perm)
-        self.user = User.objects.create_user(username='leave_approver', password='password123', role=self.role)
+        self.user = User.objects.create_user(username='leave_approver', password='password123', role=self.role, is_active=True)
         self.client.force_authenticate(user=self.user)
 
         self.person = Person.objects.create(name='Jane Vacationer', status='ACTIVE', base_rate=750.00)
@@ -122,7 +122,7 @@ class LeavesOBTests(APITestCase):
             defaults={'name': 'Attendance', 'module': 'HR'}
         )
         emp_role, _ = Role.objects.get_or_create(code='EMPLOYEE', defaults={'name': 'Employee'})
-        user = User.objects.create_user(username='bare_parent_user', password='password123', role=emp_role)
+        user = User.objects.create_user(username='bare_parent_user', password='password123', role=emp_role, is_active=True)
         user.custom_permissions.add(perm_parent)
 
         app = LeaveOBApplication.objects.create(
