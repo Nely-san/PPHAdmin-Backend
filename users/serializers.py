@@ -440,6 +440,7 @@ class UserProfileSerializer(serializers.ModelSerializer):
     role = serializers.SerializerMethodField()
     role_detail = RoleSerializer(source='role', read_only=True)
     allowed_pages = serializers.SerializerMethodField()
+    effective_permissions = serializers.SerializerMethodField()
     navigation = serializers.SerializerMethodField()
     biometrics = serializers.SerializerMethodField()
     role_code = serializers.CharField(write_only=True, required=False)
@@ -458,7 +459,7 @@ class UserProfileSerializer(serializers.ModelSerializer):
     class Meta:
         model = User
         fields = [
-            'id', 'username', 'email', 'role', 'role_detail', 'allowed_pages', 'navigation',
+            'id', 'username', 'email', 'role', 'role_detail', 'allowed_pages', 'effective_permissions', 'navigation',
             'role_code', 'role_id', 'person', 'password', 'is_active', 'is_staff', 
             'approval_status', 'rejection_reason', 'approved_by', 'approved_by_username',
             'approved_at', 'custom_permissions', 'page_codes', 'is_archived', 'created_at',
@@ -498,6 +499,96 @@ class UserProfileSerializer(serializers.ModelSerializer):
         role_pages = set(obj.role.permissions.values_list('code', flat=True))
         custom_pages = set(obj.custom_permissions.values_list('code', flat=True))
         return list(role_pages | custom_pages)
+
+    def get_effective_permissions(self, obj):
+        """
+        Returns a dict: {page_key: {view, add, edit, delete}}.
+        Batched resolver — mirrors has_page_permission's branches.
+        Kept in sync with backend/users/permissions.py::has_page_permission.
+        Any change to has_page_permission must be reflected here.
+        """
+        from users.models import UserPagePermission, PagePermission
+        from users.permissions import READONLY_PAGE_KEYS
+
+        # Fail-closed checks (mirror has_page_permission)
+        if obj is None:
+            return {}
+        if not getattr(obj, 'is_authenticated', False):
+            return {}
+        if getattr(obj, 'is_active', False) is False:
+            return {}
+        if getattr(obj, 'is_archived', False):
+            return {}
+        if getattr(obj, 'is_superuser', False):
+            # All true for every catalog key
+            catalog = PagePermission.objects.filter(is_archived=False).values_list('code', flat=True)
+            return {k: {'view': True, 'add': True, 'edit': True, 'delete': True} for k in catalog}
+        if getattr(obj, 'role_id', None) is None:
+            return {}
+        role = getattr(obj, 'role', None)
+        if role is None:
+            return {}
+        if role.code == 'SUPER_ADMIN':
+            catalog = PagePermission.objects.filter(is_archived=False).values_list('code', flat=True)
+            return {k: {'view': True, 'add': True, 'edit': True, 'delete': True} for k in catalog}
+
+        # Pre-fetch for batching (do NOT call has_page_permission per row)
+        overrides = {
+            row.page_key: row
+            for row in UserPagePermission.objects.filter(user=obj, is_archived=False)
+        }
+        role_codes = set(role.permissions.values_list('code', flat=True))
+        custom_codes = set(obj.custom_permissions.values_list('code', flat=True))
+        all_codes = role_codes | custom_codes
+
+        catalog = PagePermission.objects.filter(is_archived=False).values_list('code', flat=True)
+
+        def _eval(page_key, action):
+            # --- Override branch (mirror has_page_permission) ---
+            override = overrides.get(page_key)
+            if override is not None:
+                if not override.can_view:
+                    return False
+                if action == 'view':
+                    return True
+                if page_key in READONLY_PAGE_KEYS:
+                    return False
+                if action == 'add':
+                    return override.can_add
+                if action == 'edit':
+                    return override.can_edit
+                if action == 'delete':
+                    return override.can_delete
+                return False
+
+            # --- Fallback branch (mirror has_page_permission) ---
+            # Exact match
+            if page_key in all_codes or f"{page_key}:{action}" in all_codes:
+                granted = True
+            elif action == 'view' and any(c.startswith(f"{page_key}:") for c in all_codes):
+                granted = True
+            elif ':' in page_key:
+                parent = page_key.split(':')[0]
+                granted = (parent in all_codes) or (f"{parent}:{action}" in all_codes)
+            else:
+                granted = False
+
+            if not granted:
+                return False
+            # Intentional Phase 2 behavior change: readonly keys deny non-view
+            if action != 'view' and page_key in READONLY_PAGE_KEYS:
+                return False
+            return True
+
+        result = {}
+        for key in catalog:
+            result[key] = {
+                'view': _eval(key, 'view'),
+                'add': _eval(key, 'add'),
+                'edit': _eval(key, 'edit'),
+                'delete': _eval(key, 'delete'),
+            }
+        return result
 
     def get_navigation(self, obj):
         from settings.models import ModuleAccess

@@ -2425,3 +2425,154 @@ class UserPagePermissionEditTests(TestCase):
         self.assertEqual(res.status_code, status.HTTP_403_FORBIDDEN)
 
 
+class EffectivePermissionsPayloadTests(TestCase):
+
+    def setUp(self):
+        cache.clear()
+        self.client = APIClient()
+        self.role_super_admin = Role.objects.get(code='SUPER_ADMIN')
+        self.role_admin = Role.objects.get(code='ADMIN')
+        self.perm_attendance, _ = PagePermission.objects.get_or_create(
+            code='attendance', defaults={'name': 'Attendance', 'module': 'HR'}
+        )
+        self.role_admin.permissions.add(self.perm_attendance)
+
+    def test_super_admin_me_returns_all_true(self):
+        super_admin = User.objects.create_superuser(
+            username='eff_super_admin',
+            email='eff_super@example.com',
+            password='Password123!',
+        )
+        self.client.force_authenticate(user=super_admin)
+        res = self.client.get('/api/auth/me/')
+        self.assertEqual(res.status_code, status.HTTP_200_OK)
+        self.assertIn('effective_permissions', res.data)
+        ep = res.data['effective_permissions']
+        catalog_count = PagePermission.objects.filter(is_archived=False).count()
+        self.assertEqual(len(ep), catalog_count)
+        catalog_codes = set(PagePermission.objects.filter(is_archived=False).values_list('code', flat=True))
+        self.assertEqual(set(ep.keys()), catalog_codes)
+        for key, perms in ep.items():
+            self.assertEqual(perms, {'view': True, 'add': True, 'edit': True, 'delete': True})
+
+    def test_admin_me_with_no_overrides_matches_role(self):
+        admin = User.objects.create_user(
+            username='eff_admin_no_overrides',
+            email='eff_admin_no_overrides@example.com',
+            password='Password123!',
+            role=self.role_admin,
+            is_active=True,
+        )
+        self.client.force_authenticate(user=admin)
+        res = self.client.get('/api/auth/me/')
+        self.assertEqual(res.status_code, status.HTTP_200_OK)
+        ep = res.data['effective_permissions']
+        self.assertTrue(ep['attendance']['view'])
+        self.assertFalse(ep['audit-logs']['view'])
+
+    def test_admin_me_with_override_granting_extra_page(self):
+        admin = User.objects.create_user(
+            username='eff_admin_override_grant',
+            email='eff_admin_grant@example.com',
+            password='Password123!',
+            role=self.role_admin,
+            is_active=True,
+        )
+        UserPagePermission.objects.create(
+            user=admin,
+            page_key='audit-logs',
+            can_view=True,
+            can_add=False,
+            can_edit=False,
+            can_delete=False,
+        )
+        self.client.force_authenticate(user=admin)
+        res = self.client.get('/api/auth/me/')
+        self.assertEqual(res.status_code, status.HTTP_200_OK)
+        ep = res.data['effective_permissions']
+        self.assertTrue(ep['audit-logs']['view'])
+
+    def test_admin_me_with_override_revoking_role_grant(self):
+        admin = User.objects.create_user(
+            username='eff_admin_override_revoke',
+            email='eff_admin_revoke@example.com',
+            password='Password123!',
+            role=self.role_admin,
+            is_active=True,
+        )
+        self.client.force_authenticate(user=admin)
+        res_before = self.client.get('/api/auth/me/')
+        self.assertTrue(res_before.data['effective_permissions']['attendance']['view'])
+
+        UserPagePermission.objects.create(
+            user=admin,
+            page_key='attendance',
+            can_view=False,
+            can_add=False,
+            can_edit=False,
+            can_delete=False,
+        )
+        res_after = self.client.get('/api/auth/me/')
+        self.assertEqual(res_after.status_code, status.HTTP_200_OK)
+        self.assertFalse(res_after.data['effective_permissions']['attendance']['view'])
+
+    def test_readonly_page_key_denies_non_view_via_override(self):
+        admin = User.objects.create_user(
+            username='eff_admin_readonly_override',
+            email='eff_admin_readonly@example.com',
+            password='Password123!',
+            role=self.role_admin,
+            is_active=True,
+        )
+        UserPagePermission.objects.create(
+            user=admin,
+            page_key='audit-logs',
+            can_view=True,
+            can_add=True,
+            can_edit=True,
+            can_delete=True,
+        )
+        self.client.force_authenticate(user=admin)
+        res = self.client.get('/api/auth/me/')
+        self.assertEqual(res.status_code, status.HTTP_200_OK)
+        ep = res.data['effective_permissions']
+        self.assertTrue(ep['audit-logs']['view'])
+        self.assertFalse(ep['audit-logs']['edit'])
+        self.assertFalse(ep['audit-logs']['add'])
+        self.assertFalse(ep['audit-logs']['delete'])
+
+    def test_inactive_user_me_returns_empty_dict(self):
+        inactive_admin = User.objects.create_user(
+            username='eff_inactive_admin',
+            email='eff_inactive@example.com',
+            password='Password123!',
+            role=self.role_admin,
+            is_active=False,
+        )
+        self.client.force_authenticate(user=inactive_admin)
+        res = self.client.get('/api/auth/me/')
+        if res.status_code == status.HTTP_200_OK:
+            self.assertEqual(res.data.get('effective_permissions'), {})
+        else:
+            self.assertIn(res.status_code, (status.HTTP_401_UNAUTHORIZED, status.HTTP_403_FORBIDDEN))
+
+    def test_payload_shape_is_dict_of_four_booleans(self):
+        admin = User.objects.create_user(
+            username='eff_admin_shape',
+            email='eff_shape@example.com',
+            password='Password123!',
+            role=self.role_admin,
+            is_active=True,
+        )
+        self.client.force_authenticate(user=admin)
+        res = self.client.get('/api/auth/me/')
+        self.assertEqual(res.status_code, status.HTTP_200_OK)
+        self.assertIn('effective_permissions', res.data)
+        ep = res.data['effective_permissions']
+        self.assertIsInstance(ep, dict)
+        self.assertGreater(len(ep), 0)
+        for key, actions in ep.items():
+            self.assertEqual(set(actions.keys()), {'view', 'add', 'edit', 'delete'})
+            self.assertTrue(all(isinstance(v, bool) for v in actions.values()))
+
+
