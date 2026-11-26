@@ -1989,7 +1989,6 @@ class HasPagePermissionTests(TestCase):
         )
         with self.assertRaises(ValueError):
             has_page_permission(user, "employees", "invalid_action")
-<<<<<<< HEAD
 
     def test_readonly_page_key_denies_override_too(self):
         # Create a user with a UserPagePermission override on
@@ -2164,6 +2163,3 @@ class ConsolidatedRoleModelTests(TestCase):
         self.assertIn('EMPLOYEE', valid)
         self.assertIn('OJT', valid)
 
-
-=======
->>>>>>> 48b82c81b7a5aa3b98d7f56c588d30912a50d935
