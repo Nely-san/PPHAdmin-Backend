@@ -1,7 +1,7 @@
 ﻿from django.test import TestCase
 from rest_framework.test import APIClient
 from rest_framework import status
-from users.models import User, Role
+from users.models import User, Role, PagePermission
 from organization.models import Company, Department
 
 class OrganizationAPITests(TestCase):
@@ -62,3 +62,121 @@ class OrganizationAPITests(TestCase):
         # 7. Delete Company at /api/companies/{id}/
         del_comp_res = self.client.delete(f'/api/companies/{company_id}/')
         self.assertEqual(del_comp_res.status_code, status.HTTP_204_NO_CONTENT)
+
+
+class OrganizationPermissionsSecurityTests(TestCase):
+    def setUp(self):
+        self.client = APIClient()
+        self.admin_role, _ = Role.objects.get_or_create(
+            code='ADMIN', defaults={'name': 'Admin', 'is_system_role': True}
+        )
+        self.employee_role, _ = Role.objects.get_or_create(
+            code='EMPLOYEE', defaults={'name': 'Employee', 'is_system_role': False}
+        )
+
+        perm_edit, _ = PagePermission.objects.get_or_create(
+            code='employees:profiles:edit',
+            defaults={'name': 'Employee Profiles (Edit)', 'module': 'EMPLOYEES'}
+        )
+        self.admin_role.permissions.add(perm_edit)
+
+        self.admin_user, _ = User.objects.get_or_create(
+            username='org_admin_user',
+            defaults={
+                'email': 'admin@test.com',
+                'role': self.admin_role,
+                'approval_status': 'APPROVED',
+                'is_active': True,
+            }
+        )
+        self.employee_user, _ = User.objects.get_or_create(
+            username='org_employee_user',
+            defaults={
+                'email': 'employee@test.com',
+                'role': self.employee_role,
+                'approval_status': 'APPROVED',
+                'is_active': True,
+            }
+        )
+
+        self.company = Company.objects.create(name='Initial Company', code='INIT_CO')
+
+    def test_company_write_denied_for_employee(self):
+        # authenticate as a user with role code 'EMPLOYEE' and no
+        # employees:profiles:edit grant.
+        # POST /api/companies/ with a minimal valid body -> 403.
+        # GET /api/companies/ -> 200 (read stays open to any authenticated user).
+        self.client.force_authenticate(user=self.employee_user)
+        response = self.client.post('/api/companies/', {
+            'name': 'Denied Company',
+            'code': 'DENIED_CO',
+        }, format='json')
+        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+        self.assertEqual(response.data.get('detail'), "You do not have permission to create companies.")
+
+        get_res = self.client.get('/api/companies/')
+        self.assertEqual(get_res.status_code, status.HTTP_200_OK)
+
+    def test_company_write_allowed_for_admin(self):
+        # authenticate as a user with role code 'ADMIN' (has
+        # employees:profiles:edit today).
+        # POST /api/companies/ with a minimal valid body -> 201.
+        self.client.force_authenticate(user=self.admin_user)
+        response = self.client.post('/api/companies/', {
+            'name': 'Admin Allowed Company',
+            'code': 'ADM_CO',
+        }, format='json')
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+
+    def test_department_write_denied_for_employee(self):
+        # authenticate as a user with role code 'EMPLOYEE' and no
+        # employees:profiles:edit grant.
+        # POST /api/departments/ with a minimal valid body -> 403.
+        # GET /api/departments/ -> 200 (read stays open to any authenticated user).
+        self.client.force_authenticate(user=self.employee_user)
+        response = self.client.post('/api/departments/', {
+            'name': 'Denied Department',
+            'code': 'DENIED_DEPT',
+            'company_id': str(self.company.id),
+        }, format='json')
+        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+        self.assertEqual(response.data.get('detail'), "You do not have permission to create departments.")
+
+        get_res = self.client.get('/api/departments/')
+        self.assertEqual(get_res.status_code, status.HTTP_200_OK)
+
+    def test_department_write_allowed_for_admin(self):
+        # authenticate as a user with role code 'ADMIN' (has
+        # employees:profiles:edit today).
+        # POST /api/departments/ with a minimal valid body -> 201.
+        self.client.force_authenticate(user=self.admin_user)
+        response = self.client.post('/api/departments/', {
+            'name': 'Admin Allowed Department',
+            'code': 'ADM_DEPT',
+            'company_id': str(self.company.id),
+        }, format='json')
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+
+    def test_company_nested_department_create_denied_for_employee(self):
+        # authenticate as EMPLOYEE. POST /api/companies/<company.id>/departments/
+        # with a minimal valid body. Expect 403.
+        self.client.force_authenticate(user=self.employee_user)
+        response = self.client.post(
+            f'/api/companies/{self.company.id}/departments/',
+            {'name': 'Denied Nested Dept', 'code': 'DEN_NEST_DEPT'},
+            format='json'
+        )
+        self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+        self.assertEqual(response.data.get('detail'), "You do not have permission to create departments.")
+
+    def test_company_nested_department_create_allowed_for_admin(self):
+        # authenticate as ADMIN. POST the same URL. Expect 201.
+        self.client.force_authenticate(user=self.admin_user)
+        response = self.client.post(
+            f'/api/companies/{self.company.id}/departments/',
+            {'name': 'Admin Nested Dept', 'code': 'ADM_NEST_DEPT'},
+            format='json'
+        )
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+
+

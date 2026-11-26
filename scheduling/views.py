@@ -10,6 +10,10 @@ from scheduling.serializers import (
 )
 from users.models import Person
 
+# NOTE (Phase 2): move to users/permissions.py and re-export from
+# users/views.py to eliminate the settings.views -> users.views coupling.
+from users.views import user_has_module_permission
+
 class ShiftViewSet(viewsets.ModelViewSet):
     """
     CRUD ViewSet for Shift Templates.
@@ -20,7 +24,49 @@ class ShiftViewSet(viewsets.ModelViewSet):
     permission_classes = [permissions.IsAuthenticated]
     pagination_class = None
 
+    def _caller_may_write(self, request):
+        if not request.user or not request.user.is_authenticated:
+            return False
+        if request.user.is_active is False or getattr(request.user, "is_archived", False):
+            return False
+        if getattr(request.user, "is_superuser", False):
+            return True
+        # TODO (Phase 2): map HTTP verb to action (create->add, destroy->delete,
+        # update/partial_update->edit) when the resolver centralizes this.
+        return user_has_module_permission(
+            request.user, "attendance:schedules", action="edit"
+        )
+
+    def create(self, request, *args, **kwargs):
+        if not self._caller_may_write(request):
+            return Response(
+                {"detail": "You do not have permission to create shifts."},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+        return super().create(request, *args, **kwargs)
+
+    def update(self, request, *args, **kwargs):
+        if not self._caller_may_write(request):
+            return Response(
+                {"detail": "You do not have permission to edit shifts."},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+        return super().update(request, *args, **kwargs)
+
+    def partial_update(self, request, *args, **kwargs):
+        if not self._caller_may_write(request):
+            return Response(
+                {"detail": "You do not have permission to edit shifts."},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+        return super().partial_update(request, *args, **kwargs)
+
     def destroy(self, request, *args, **kwargs):
+        if not self._caller_may_write(request):
+            return Response(
+                {"detail": "You do not have permission to delete shifts."},
+                status=status.HTTP_403_FORBIDDEN,
+            )
         shift = self.get_object()
         shift.archive(user_identifier=request.user.username)
         return Response(status=status.HTTP_204_NO_CONTENT)
@@ -28,6 +74,11 @@ class ShiftViewSet(viewsets.ModelViewSet):
     @action(detail=False, methods=['post'], url_path='seed-defaults')
     def seed_defaults(self, request):
         """Seed default baseline shift templates if none exist."""
+        if not self._caller_may_write(request):
+            return Response(
+                {"detail": "You do not have permission to seed shift defaults."},
+                status=status.HTTP_403_FORBIDDEN,
+            )
         defaults = [
             {'code': 'DAY', 'name': 'Day Shift (09:00 - 18:00)', 'start_time': '09:00', 'end_time': '18:00', 'break_start_time': '12:00', 'break_end_time': '13:00', 'work_hours': 8.00, 'grace_period_mins': 10},
             {'code': 'NIGHT', 'name': 'Night Shift (22:00 - 07:00)', 'start_time': '22:00', 'end_time': '07:00', 'break_start_time': '02:00', 'break_end_time': '03:00', 'work_hours': 8.00, 'grace_period_mins': 10},
@@ -54,6 +105,51 @@ class ScheduleViewSet(viewsets.ModelViewSet):
     serializer_class = ScheduleSerializer
     permission_classes = [permissions.IsAuthenticated]
     pagination_class = None
+
+    def _caller_may_write(self, request):
+        if not request.user or not request.user.is_authenticated:
+            return False
+        if request.user.is_active is False or getattr(request.user, "is_archived", False):
+            return False
+        if getattr(request.user, "is_superuser", False):
+            return True
+        # TODO (Phase 2): map HTTP verb to action (create->add, destroy->delete,
+        # update/partial_update->edit) when the resolver centralizes this.
+        return user_has_module_permission(
+            request.user, "attendance:schedules", action="edit"
+        )
+
+    def create(self, request, *args, **kwargs):
+        if not self._caller_may_write(request):
+            return Response(
+                {"detail": "You do not have permission to create schedules."},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+        return super().create(request, *args, **kwargs)
+
+    def update(self, request, *args, **kwargs):
+        if not self._caller_may_write(request):
+            return Response(
+                {"detail": "You do not have permission to edit schedules."},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+        return super().update(request, *args, **kwargs)
+
+    def partial_update(self, request, *args, **kwargs):
+        if not self._caller_may_write(request):
+            return Response(
+                {"detail": "You do not have permission to edit schedules."},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+        return super().partial_update(request, *args, **kwargs)
+
+    def destroy(self, request, *args, **kwargs):
+        if not self._caller_may_write(request):
+            return Response(
+                {"detail": "You do not have permission to delete schedules."},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+        return super().destroy(request, *args, **kwargs)
 
     def get_queryset(self):
         qs = super().get_queryset()
@@ -88,6 +184,11 @@ class ScheduleViewSet(viewsets.ModelViewSet):
         """
         Assigns shifts and rosters to multiple personnel over a date span.
         """
+        if not self._caller_may_write(request):
+            return Response(
+                {"detail": "You do not have permission to batch assign schedules."},
+                status=status.HTTP_403_FORBIDDEN,
+            )
         serializer = BatchScheduleAssignSerializer(data=request.data)
         serializer.is_valid(raise_exception=True)
         data = serializer.validated_data
