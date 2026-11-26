@@ -158,6 +158,33 @@ class User(AbstractBaseUser, PermissionsMixin, BaseModel):
         super().restore()
 
 
+class UserPagePermission(BaseModel):
+    user = models.ForeignKey(
+        User, on_delete=models.CASCADE, related_name="page_permissions"
+    )
+    page_key = models.CharField(max_length=100)
+    can_view = models.BooleanField(default=False)
+    can_add = models.BooleanField(default=False)
+    can_edit = models.BooleanField(default=False)
+    can_delete = models.BooleanField(default=False)
+    updated_by = models.ForeignKey(
+        User, null=True, blank=True,
+        on_delete=models.SET_NULL, related_name="+"
+    )
+
+    class Meta:
+        db_table = "user_page_permissions"
+        ordering = ["user_id", "page_key"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["user", "page_key"],
+                name="uniq_user_page_permission",
+            )
+        ]
+
+    def __str__(self):
+        return f"{self.user_id}:{self.page_key}"
+
 
 class Person(BaseModel):
     """
