@@ -2163,3 +2163,265 @@ class ConsolidatedRoleModelTests(TestCase):
         self.assertIn('EMPLOYEE', valid)
         self.assertIn('OJT', valid)
 
+
+class UserPagePermissionEditTests(TestCase):
+    def setUp(self):
+        cache.clear()
+        self.client = APIClient()
+        self.role_super_admin = Role.objects.get(code='SUPER_ADMIN')
+        self.role_admin = Role.objects.get(code='ADMIN')
+
+        self.super_admin = User.objects.create_superuser(
+            username='sa_edit_test',
+            password='Password123!',
+        )
+        self.admin_full = User.objects.create_user(
+            username='admin_full_test',
+            password='Password123!',
+            role=self.role_admin,
+            is_active=True,
+        )
+        UserPagePermission.objects.create(
+            user=self.admin_full,
+            page_key='roles-permissions',
+            can_view=True,
+            can_add=True,
+            can_edit=True,
+            can_delete=True,
+        )
+        self.admin_limited = User.objects.create_user(
+            username='admin_limited_test',
+            password='Password123!',
+            role=self.role_admin,
+            is_active=True,
+        )
+        self.target = User.objects.create_user(
+            username='target_user_test',
+            password='Password123!',
+            role=self.role_admin,
+            is_active=True,
+        )
+
+    def test_actor_cannot_grant_what_they_lack(self):
+        # admin_full has an override on employees denying can_delete
+        UserPagePermission.objects.create(
+            user=self.admin_full,
+            page_key='employees',
+            can_view=True,
+            can_add=True,
+            can_edit=True,
+            can_delete=False,
+        )
+        self.client.force_authenticate(user=self.admin_full)
+        res = self.client.put(
+            f'/api/users/{self.target.id}/permissions/employees/',
+            {'can_view': True, 'can_delete': True},
+            format='json',
+        )
+        self.assertEqual(res.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn('cannot grant', str(res.data))
+
+    def test_actor_can_grant_what_they_hold(self):
+        self.client.force_authenticate(user=self.super_admin)
+        res = self.client.put(
+            f'/api/users/{self.target.id}/permissions/employees/',
+            {'can_view': True, 'can_edit': True},
+            format='json',
+        )
+        self.assertEqual(res.status_code, status.HTTP_200_OK)
+        self.assertTrue(res.data['can_view'])
+        self.assertTrue(res.data['can_edit'])
+        self.assertFalse(res.data['can_delete'])
+        row = UserPagePermission.objects.get(user=self.target, page_key='employees')
+        self.assertTrue(row.can_view)
+        self.assertTrue(row.can_edit)
+        self.assertFalse(row.can_delete)
+
+    def test_actor_cannot_revoke_what_they_cannot_view(self):
+        # target already has an override granting view on employees
+        UserPagePermission.objects.create(
+            user=self.target,
+            page_key='employees',
+            can_view=True,
+            can_edit=True,
+        )
+        # admin_full has an override denying view on employees
+        UserPagePermission.objects.create(
+            user=self.admin_full,
+            page_key='employees',
+            can_view=False,
+            can_add=False,
+            can_edit=False,
+            can_delete=False,
+        )
+        self.client.force_authenticate(user=self.admin_full)
+        res = self.client.put(
+            f'/api/users/{self.target.id}/permissions/employees/',
+            {'can_view': False, 'can_edit': False},
+            format='json',
+        )
+        self.assertEqual(res.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn('cannot revoke', str(res.data))
+
+    def test_actor_cannot_edit_own_permissions(self):
+        self.client.force_authenticate(user=self.admin_full)
+        res = self.client.put(
+            f'/api/users/{self.admin_full.id}/permissions/employees/',
+            {'can_view': True},
+            format='json',
+        )
+        self.assertEqual(res.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn('cannot edit your own permissions', str(res.data))
+
+    def test_only_super_admin_can_edit_super_admin(self):
+        with patch.object(User, 'clean'):
+            sa2 = User.objects.create_superuser(
+                username='sa2_test',
+                password='Password123!',
+            )
+        # admin_full has roles-permissions:edit, so passes _caller_may_edit,
+        # but serializer must block editing a SUPER_ADMIN
+        self.client.force_authenticate(user=self.admin_full)
+        res = self.client.put(
+            f'/api/users/{sa2.id}/permissions/employees/',
+            {'can_view': True},
+            format='json',
+        )
+        self.assertEqual(res.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn("Only a SUPER_ADMIN can edit a SUPER_ADMIN's permissions", str(res.data))
+
+        # SUPER_ADMIN editing sa2 is allowed
+        self.client.force_authenticate(user=self.super_admin)
+        res_ok = self.client.put(
+            f'/api/users/{sa2.id}/permissions/employees/',
+            {'can_view': True},
+            format='json',
+        )
+        self.assertEqual(res_ok.status_code, status.HTTP_200_OK)
+
+    def test_unknown_page_key_returns_400(self):
+        self.client.force_authenticate(user=self.super_admin)
+        res = self.client.put(
+            f'/api/users/{self.target.id}/permissions/unknown-random-key-999/',
+            {'can_view': True},
+            format='json',
+        )
+        self.assertEqual(res.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn('Unknown page_key', str(res.data))
+
+    def test_update_writes_audit_log_with_old_and_new(self):
+        import json
+        from settings.models import AuditLog
+        self.client.force_authenticate(user=self.super_admin)
+        # First creation write
+        res1 = self.client.put(
+            f'/api/users/{self.target.id}/permissions/dashboard/',
+            {'can_view': True},
+            format='json',
+        )
+        self.assertEqual(res1.status_code, status.HTTP_200_OK)
+        log1 = AuditLog.objects.filter(
+            table_name='user_page_permissions', record_id=str(self.target.id)
+        ).latest('created_at')
+        self.assertEqual(log1.action, 'create')
+        self.assertEqual(log1.changed_by, self.super_admin.username)
+        new_data1 = json.loads(log1.new_data)
+        self.assertTrue(new_data1['can_view'])
+
+        # Update write with changed values
+        res2 = self.client.put(
+            f'/api/users/{self.target.id}/permissions/dashboard/',
+            {'can_view': False},
+            format='json',
+        )
+        self.assertEqual(res2.status_code, status.HTTP_200_OK)
+        log2 = AuditLog.objects.filter(
+            table_name='user_page_permissions', record_id=str(self.target.id)
+        ).latest('created_at')
+        self.assertEqual(log2.action, 'update')
+        old_data2 = json.loads(log2.old_data)
+        new_data2 = json.loads(log2.new_data)
+        self.assertTrue(old_data2['can_view'])
+        self.assertFalse(new_data2['can_view'])
+
+    def test_idempotent_update_writes_no_audit_log(self):
+        from settings.models import AuditLog
+        self.client.force_authenticate(user=self.super_admin)
+        # Create row
+        res1 = self.client.put(
+            f'/api/users/{self.target.id}/permissions/dashboard/',
+            {'can_view': True},
+            format='json',
+        )
+        self.assertEqual(res1.status_code, status.HTTP_200_OK)
+        count_before = AuditLog.objects.filter(
+            table_name='user_page_permissions', record_id=str(self.target.id)
+        ).count()
+
+        # Idempotent call with identical values
+        res2 = self.client.put(
+            f'/api/users/{self.target.id}/permissions/dashboard/',
+            {'can_view': True},
+            format='json',
+        )
+        self.assertEqual(res2.status_code, status.HTTP_200_OK)
+        count_after = AuditLog.objects.filter(
+            table_name='user_page_permissions', record_id=str(self.target.id)
+        ).count()
+        self.assertEqual(count_before, count_after)
+
+    def test_reset_deletes_all_rows_and_writes_audit_log(self):
+        import json
+        from settings.models import AuditLog
+        UserPagePermission.objects.create(
+            user=self.target, page_key='dashboard', can_view=True
+        )
+        UserPagePermission.objects.create(
+            user=self.target, page_key='employees', can_view=True
+        )
+        self.assertEqual(UserPagePermission.objects.filter(user=self.target).count(), 2)
+
+        self.client.force_authenticate(user=self.super_admin)
+        res = self.client.post(
+            f'/api/users/{self.target.id}/permissions/reset/',
+            format='json',
+        )
+        self.assertEqual(res.status_code, status.HTTP_200_OK)
+        self.assertEqual(res.data, {'detail': 'Reset 2 permissions'})
+        self.assertEqual(UserPagePermission.objects.filter(user=self.target).count(), 0)
+
+        log = AuditLog.objects.filter(
+            table_name='user_page_permissions', record_id=str(self.target.id), action='reset'
+        ).latest('created_at')
+        self.assertEqual(log.changed_by, self.super_admin.username)
+        self.assertEqual(json.loads(log.old_data), {'deleted': 2})
+
+    def test_non_admin_gets_403_on_list(self):
+        non_editor = User.objects.create_user(
+            username='non_editor_user',
+            password='Password123!',
+            role=self.role_admin,
+            is_active=True,
+        )
+        UserPagePermission.objects.create(
+            user=non_editor,
+            page_key='roles-permissions',
+            can_view=False,
+            can_edit=False,
+        )
+        self.client.force_authenticate(user=non_editor)
+        res = self.client.get(f'/api/users/{self.target.id}/permissions/')
+        self.assertEqual(res.status_code, status.HTTP_403_FORBIDDEN)
+
+    def test_inactive_actor_gets_403(self):
+        inactive_admin = User.objects.create_user(
+            username='inactive_admin_user',
+            password='Password123!',
+            role=self.role_admin,
+            is_active=False,
+        )
+        self.client.force_authenticate(user=inactive_admin)
+        res = self.client.get(f'/api/users/{self.target.id}/permissions/')
+        self.assertEqual(res.status_code, status.HTTP_403_FORBIDDEN)
+
+

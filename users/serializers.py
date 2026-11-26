@@ -911,3 +911,81 @@ class NotificationPreferenceSerializer(serializers.ModelSerializer):
             if camel in mapped_data and snake not in mapped_data:
                 mapped_data[snake] = mapped_data[camel]
         return super().to_internal_value(mapped_data)
+
+
+from users.models import UserPagePermission
+
+
+class UserPagePermissionListSerializer(serializers.ModelSerializer):
+    page_key_name = serializers.SerializerMethodField()
+
+    class Meta:
+        model = UserPagePermission
+        fields = [
+            'id', 'page_key', 'page_key_name',
+            'can_view', 'can_add', 'can_edit', 'can_delete',
+            'updated_by_id', 'updated_at',
+        ]
+        read_only_fields = fields
+
+    def get_page_key_name(self, obj):
+        from users.models import PagePermission
+        row = PagePermission.objects.filter(code=obj.page_key).first()
+        return row.name if row else obj.page_key
+
+
+class UserPagePermissionEditSerializer(serializers.Serializer):
+    page_key = serializers.CharField()
+    can_view = serializers.BooleanField(required=False, default=False)
+    can_add = serializers.BooleanField(required=False, default=False)
+    can_edit = serializers.BooleanField(required=False, default=False)
+    can_delete = serializers.BooleanField(required=False, default=False)
+
+    def validate_page_key(self, value):
+        from users.models import PagePermission
+        if not PagePermission.objects.filter(code=value).exists():
+            raise serializers.ValidationError(
+                f"Unknown page_key: {value}"
+            )
+        return value
+
+    def validate(self, attrs):
+        from users.permissions import has_page_permission
+        actor = self.context['request'].user
+        target_user = self.context['target_user']
+        page_key = attrs['page_key']
+        field_to_action = {
+            'can_view': 'view', 'can_add': 'add',
+            'can_edit': 'edit', 'can_delete': 'delete',
+        }
+
+        if target_user.pk == actor.pk:
+            raise serializers.ValidationError(
+                "You cannot edit your own permissions."
+            )
+
+        if (target_user.role and target_user.role.code == 'SUPER_ADMIN'
+                and (not actor.role or actor.role.code != 'SUPER_ADMIN')):
+            raise serializers.ValidationError(
+                "Only a SUPER_ADMIN can edit a SUPER_ADMIN's permissions."
+            )
+
+        current = UserPagePermission.objects.filter(
+            user=target_user, page_key=page_key, is_archived=False
+        ).first()
+
+        for field, action in field_to_action.items():
+            new_val = bool(attrs.get(field, False))
+            old_val = bool(getattr(current, field, False)) if current else False
+            if new_val and not old_val:
+                if not has_page_permission(actor, page_key, action):
+                    raise serializers.ValidationError(
+                        f"You cannot grant {page_key}:{action} — you do not hold it."
+                    )
+            elif old_val and not new_val:
+                if not has_page_permission(actor, page_key, 'view'):
+                    raise serializers.ValidationError(
+                        f"You cannot revoke {page_key}:{action} — you cannot view that page."
+                    )
+
+        return attrs

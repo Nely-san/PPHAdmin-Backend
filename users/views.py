@@ -1181,3 +1181,114 @@ def attendance_reset_view(request):
         'status': 'success',
         'message': f'Attendance records reset cleanly. {count} temporary imported record(s) purged.'
     }, status=status.HTTP_200_OK)
+
+
+class UserPagePermissionViewSet(viewsets.ViewSet):
+    lookup_field = 'page_key'
+    permission_classes = [permissions.IsAuthenticated]
+
+    def _caller_may_edit(self, request, target_user):
+        if not request.user or not request.user.is_authenticated:
+            return False
+        if not request.user.is_active or getattr(request.user, 'is_archived', False):
+            return False
+        if getattr(request.user, 'is_superuser', False):
+            return True
+        if request.user.role and request.user.role.code == 'SUPER_ADMIN':
+            return True
+        from users.permissions import has_page_permission
+        return has_page_permission(request.user, 'roles-permissions', 'edit')
+
+    def list(self, request, user_id=None):
+        from django.shortcuts import get_object_or_404
+        from users.models import User, UserPagePermission
+        from users.serializers import UserPagePermissionListSerializer
+        target = get_object_or_404(User, pk=user_id)
+        if not self._caller_may_edit(request, target):
+            return Response({'detail': 'Forbidden'}, status=403)
+        rows = UserPagePermission.objects.filter(
+            user=target, is_archived=False
+        )
+        return Response(UserPagePermissionListSerializer(rows, many=True).data)
+
+    def update(self, request, user_id=None, page_key=None, **kwargs):
+        import json
+        from django.shortcuts import get_object_or_404
+        from users.models import User, UserPagePermission
+        from settings.models import AuditLog
+        from users.serializers import (
+            UserPagePermissionEditSerializer, UserPagePermissionListSerializer
+        )
+        page_key = page_key or kwargs.get('pk')
+        target = get_object_or_404(User, pk=user_id)
+        if not self._caller_may_edit(request, target):
+            return Response({'detail': 'Forbidden'}, status=403)
+        data = {**request.data, 'page_key': page_key}
+        ser = UserPagePermissionEditSerializer(
+            data=data,
+            context={'request': request, 'target_user': target},
+        )
+        ser.is_valid(raise_exception=True)
+        v = ser.validated_data
+        existing = UserPagePermission.objects.filter(
+            user=target, page_key=page_key, is_archived=False
+        ).first()
+        old_data = None
+        if existing:
+            old_data = {
+                'can_view': existing.can_view,
+                'can_add': existing.can_add,
+                'can_edit': existing.can_edit,
+                'can_delete': existing.can_delete,
+            }
+        row, _ = UserPagePermission.objects.update_or_create(
+            user=target, page_key=page_key,
+            defaults={
+                'can_view': v.get('can_view', False),
+                'can_add': v.get('can_add', False),
+                'can_edit': v.get('can_edit', False),
+                'can_delete': v.get('can_delete', False),
+                'updated_by': request.user,
+                'is_archived': False,
+            },
+        )
+        new_data = {
+            'can_view': row.can_view,
+            'can_add': row.can_add,
+            'can_edit': row.can_edit,
+            'can_delete': row.can_delete,
+        }
+        if old_data != new_data:
+            changed_by = getattr(request.user, 'username', str(request.user.pk))
+            AuditLog.objects.create(
+                table_name='user_page_permissions',
+                record_id=str(target.pk),
+                action='update' if old_data else 'create',
+                old_data=json.dumps(old_data) if old_data else '{}',
+                new_data=json.dumps(new_data),
+                changed_by=changed_by,
+            )
+        return Response(UserPagePermissionListSerializer(row).data)
+
+    @action(detail=False, methods=['post'], url_path='reset',
+            permission_classes=[permissions.IsAuthenticated])
+    def reset(self, request, user_id=None):
+        import json
+        from django.shortcuts import get_object_or_404
+        from users.models import User, UserPagePermission
+        from settings.models import AuditLog
+        target = get_object_or_404(User, pk=user_id)
+        if not self._caller_may_edit(request, target):
+            return Response({'detail': 'Forbidden'}, status=403)
+        count, _ = UserPagePermission.objects.filter(user=target).delete()
+        changed_by = getattr(request.user, 'username', str(request.user.pk))
+        AuditLog.objects.create(
+            table_name='user_page_permissions',
+            record_id=str(target.pk),
+            action='reset',
+            old_data=json.dumps({'deleted': count}),
+            new_data='{}',
+            changed_by=changed_by,
+        )
+        return Response({'detail': f'Reset {count} permissions'}, status=200)
+

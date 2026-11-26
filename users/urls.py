@@ -2,10 +2,16 @@ from django.urls import path, include
 from rest_framework.routers import DefaultRouter
 from rest_framework_simplejwt.views import TokenRefreshView
 from users.views import *
+from users.views import UserPagePermissionViewSet
 
 router = DefaultRouter()
 router.register(r'users', UserViewSet, basename='users')
 router.register(r'persons', PersonViewSet, basename='persons')
+router.register(
+    r'users/(?P<user_id>[^/.]+)/permissions',
+    UserPagePermissionViewSet,
+    basename='user-permissions',
+)
 
 urlpatterns = [
     # Authentication endpoints
@@ -22,6 +28,9 @@ urlpatterns = [
     # Resource routers (users, persons)
     path('users/registration-toggle/', registration_toggle_view, name='registration_toggle'),
     path('users/registration-toggle', registration_toggle_view, name='registration_toggle_no_slash'),
+    path('users/<uuid:user_id>/permissions/reset/',
+         UserPagePermissionViewSet.as_view({'post': 'reset'}),
+         name='user-permissions-reset'),
     path('', include(router.urls)),
 
     # Notification endpoints
