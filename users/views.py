@@ -59,41 +59,7 @@ ROLE_ORDER_MAP = {
 }
 
 
-def user_has_module_permission(user, module_code, action='edit', allowed_role_codes=None):
-    """
-    Evaluates whether an authenticated user has permission to access or perform
-    an action on a given system module.
-    - Super Admins have unrestricted access.
-    - Dynamic module codes from role.permissions and custom_permissions are evaluated.
-    """
-    if not user or not user.is_authenticated:
-        return False
-
-    user_role_code = user.role.code if user.role else ''
-    if user_role_code == 'SUPER_ADMIN' or getattr(user, 'is_superuser', False):
-        return True
-
-    role_codes = set()
-    if user.role:
-        role_codes = set(user.role.permissions.values_list('code', flat=True))
-    custom_codes = set(user.custom_permissions.values_list('code', flat=True))
-    all_codes = role_codes | custom_codes
-
-    # Direct match: full module or specific action
-    if module_code in all_codes or f"{module_code}:{action}" in all_codes:
-        return True
-
-    # If action is 'view', check if any sub-action of this module is granted
-    if action == 'view' and any(c.startswith(f"{module_code}:") for c in all_codes):
-        return True
-
-    # If module_code has sub-modules (e.g. 'attendance:leaves'), check parent module
-    if ':' in module_code:
-        parent = module_code.split(':')[0]
-        if parent in all_codes or f"{parent}:{action}" in all_codes:
-            return True
-
-    return False
+from users.permissions import user_has_module_permission  # noqa: F401
 
 
 class HasUserManagementViewPermission(permissions.BasePermission):

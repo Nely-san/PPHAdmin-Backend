@@ -20,6 +20,7 @@ class HasLeaveApprovalPermission(permissions.BasePermission):
     Requires 'attendance:leaves:edit' (or parent module) or Superadmin.
     """
     def has_permission(self, request, view):
+        # KEPT: multi-key check - resolve in Phase 3
         return user_has_module_permission(
             request.user,
             'attendance:leaves',

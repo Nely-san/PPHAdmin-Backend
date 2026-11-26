@@ -8,15 +8,18 @@ from django.test import TestCase, TransactionTestCase
 from rest_framework.test import APIClient
 from rest_framework import status
 from unittest.mock import patch
+from django.contrib.auth.models import AnonymousUser
 from users.models import (
     User,
     Role,
     PagePermission,
+    UserPagePermission,
     Person,
     PersonProfile,
     CharacterReference,
     ensure_person_profile,
 )
+from users.permissions import has_page_permission
 from biometrics_attendance.models import BiometricEnrollment
 
 
@@ -1797,3 +1800,147 @@ class PersonProfileMigrationTests(TransactionTestCase):
         migrated_person = HistoricalPerson.objects.get(pk=person_id)
         self.assertEqual(migrated_person.name, 'Migration Reverse Employee')
         self.assertEqual(migrated_person.status, 'ACTIVE')
+
+
+class HasPagePermissionTests(TestCase):
+    def setUp(self):
+        cache.clear()
+        self.role, _ = Role.objects.get_or_create(
+            code="HR_MANAGER", defaults={"name": "HR Manager"}
+        )
+        self.perm_emp_view, _ = PagePermission.objects.get_or_create(
+            code="employees:view", defaults={"name": "View Employees", "module": "HR"}
+        )
+        self.perm_emp_edit, _ = PagePermission.objects.get_or_create(
+            code="employees:edit", defaults={"name": "Edit Employees", "module": "HR"}
+        )
+        self.perm_dash, _ = PagePermission.objects.get_or_create(
+            code="dashboard", defaults={"name": "Dashboard", "module": "SYSTEM"}
+        )
+        self.perm_dash_edit, _ = PagePermission.objects.get_or_create(
+            code="dashboard:edit", defaults={"name": "Dashboard Edit", "module": "SYSTEM"}
+        )
+
+    def test_unauthenticated_denied(self):
+        self.assertFalse(has_page_permission(None, "employees", "view"))
+        anon = AnonymousUser()
+        self.assertFalse(has_page_permission(anon, "employees", "view"))
+
+    def test_inactive_user_denied(self):
+        user = User.objects.create_user(
+            username="inactive_user", password="Password123!", role=self.role, is_active=False
+        )
+        self.assertFalse(has_page_permission(user, "employees", "view"))
+
+    def test_archived_user_denied(self):
+        user = User.objects.create_user(
+            username="archived_user", password="Password123!", role=self.role, is_active=True, is_archived=True
+        )
+        self.assertFalse(has_page_permission(user, "employees", "view"))
+
+    def test_no_role_denied(self):
+        user = User.objects.create_user(
+            username="no_role_user", password="Password123!", role=None, is_active=True
+        )
+        self.assertFalse(has_page_permission(user, "employees", "view"))
+
+    def test_superuser_allowed(self):
+        superuser = User.objects.create_superuser(
+            username="super_user", password="Password123!"
+        )
+        self.assertTrue(has_page_permission(superuser, "employees", "view"))
+        self.assertTrue(has_page_permission(superuser, "employees", "edit"))
+        self.assertTrue(has_page_permission(superuser, "dashboard", "edit"))
+
+    def test_super_admin_role_allowed(self):
+        sa_role, _ = Role.objects.get_or_create(
+            code="SUPER_ADMIN", defaults={"name": "Super Admin", "is_system_role": True}
+        )
+        sa_user = User.objects.create_user(
+            username="sa_role_user", password="Password123!", role=sa_role, is_active=True
+        )
+        self.assertTrue(has_page_permission(sa_user, "employees", "view"))
+        self.assertTrue(has_page_permission(sa_user, "employees", "edit"))
+        self.assertTrue(has_page_permission(sa_user, "dashboard", "edit"))
+
+    def test_override_grants_when_role_does_not(self):
+        user = User.objects.create_user(
+            username="override_grant_user", password="Password123!", role=self.role, is_active=True
+        )
+        self.assertFalse(has_page_permission(user, "employees", "view"))
+        UserPagePermission.objects.create(
+            user=user,
+            page_key="employees",
+            can_view=True,
+            can_add=True,
+            can_edit=False,
+            can_delete=False,
+        )
+        self.assertTrue(has_page_permission(user, "employees", "view"))
+        self.assertTrue(has_page_permission(user, "employees", "add"))
+        self.assertFalse(has_page_permission(user, "employees", "edit"))
+
+    def test_override_revokes_when_role_grants(self):
+        role_with_perms, _ = Role.objects.get_or_create(
+            code="PERM_ROLE", defaults={"name": "Perm Role"}
+        )
+        role_with_perms.permissions.add(self.perm_emp_view, self.perm_emp_edit)
+        user = User.objects.create_user(
+            username="override_revoke_user", password="Password123!", role=role_with_perms, is_active=True
+        )
+        self.assertTrue(has_page_permission(user, "employees", "edit"))
+        UserPagePermission.objects.create(
+            user=user,
+            page_key="employees",
+            can_view=True,
+            can_add=False,
+            can_edit=False,
+            can_delete=False,
+        )
+        self.assertFalse(has_page_permission(user, "employees", "edit"))
+
+    def test_override_add_true_view_false_denies_add(self):
+        user = User.objects.create_user(
+            username="override_conflict_user", password="Password123!", role=self.role, is_active=True
+        )
+        UserPagePermission.objects.create(
+            user=user,
+            page_key="employees",
+            can_view=False,
+            can_add=True,
+            can_edit=True,
+            can_delete=True,
+        )
+        self.assertFalse(has_page_permission(user, "employees", "add"))
+        self.assertFalse(has_page_permission(user, "employees", "view"))
+
+    def test_no_override_falls_back_to_role(self):
+        role_with_perms, _ = Role.objects.get_or_create(
+            code="FALLBACK_ROLE", defaults={"name": "Fallback Role"}
+        )
+        role_with_perms.permissions.add(self.perm_emp_view, self.perm_emp_edit)
+        user = User.objects.create_user(
+            username="fallback_user", password="Password123!", role=role_with_perms, is_active=True
+        )
+        self.assertTrue(has_page_permission(user, "employees", "view"))
+        self.assertTrue(has_page_permission(user, "employees", "edit"))
+        self.assertFalse(has_page_permission(user, "employees", "delete"))
+
+    def test_readonly_page_key_denies_non_view(self):
+        role_with_perms, _ = Role.objects.get_or_create(
+            code="READONLY_ROLE", defaults={"name": "Readonly Role"}
+        )
+        role_with_perms.permissions.add(self.perm_dash, self.perm_dash_edit)
+        user = User.objects.create_user(
+            username="readonly_user", password="Password123!", role=role_with_perms, is_active=True
+        )
+        self.assertTrue(has_page_permission(user, "dashboard", "view"))
+        self.assertFalse(has_page_permission(user, "dashboard", "edit"))
+        self.assertFalse(has_page_permission(user, "audit-logs", "add"))
+
+    def test_unknown_action_raises(self):
+        user = User.objects.create_user(
+            username="unknown_action_user", password="Password123!", role=self.role, is_active=True
+        )
+        with self.assertRaises(ValueError):
+            has_page_permission(user, "employees", "invalid_action")

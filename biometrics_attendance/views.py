@@ -28,6 +28,7 @@ class HasBiometricUploadPermission(permissions.BasePermission):
     def has_permission(self, request, view):
         if not request.user or not request.user.is_authenticated:
             return False
+        # KEPT: multi-key check - resolve in Phase 3
         if request.method in permissions.SAFE_METHODS:
             return user_has_module_permission(
                 request.user,
@@ -288,6 +289,7 @@ class HasAttendanceExceptionPermission(permissions.BasePermission):
         if action == 'justify':
             # Detail action: permit authenticated caller to reach has_object_permission
             return True
+        # KEPT: multi-key check - resolve in Phase 3
         if action in ['list', 'retrieve'] or request.method in permissions.SAFE_METHODS:
             return user_has_module_permission(
                 request.user,
@@ -304,6 +306,7 @@ class HasAttendanceExceptionPermission(permissions.BasePermission):
         action = getattr(view, 'action', '')
         if action == 'justify':
             # Manager / Supervisor with edit permission can justify anyone
+            # KEPT: multi-key check - resolve in Phase 3
             if user_has_module_permission(
                 request.user,
                 'attendance:exceptions',
@@ -318,6 +321,7 @@ class HasAttendanceExceptionPermission(permissions.BasePermission):
                 return True
             return False
 
+        # KEPT: multi-key check - resolve in Phase 3
         if action in ['retrieve'] or request.method in permissions.SAFE_METHODS:
             return user_has_module_permission(
                 request.user,
