@@ -85,9 +85,8 @@ target/
 __pycache__/
 local_settings.py
 
-# Ignore Django migration files
-**/migrations/
-!**/migrations/__init__.py
+# Ignore Django migration pycache only
+**/migrations/__pycache__/
 
 .env
 db.sqlite3
