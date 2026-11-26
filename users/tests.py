@@ -1945,3 +1945,71 @@ class HasPagePermissionTests(TestCase):
         )
         with self.assertRaises(ValueError):
             has_page_permission(user, "employees", "invalid_action")
+
+    def test_readonly_page_key_denies_override_too(self):
+        # Create a user with a UserPagePermission override on
+        # 'audit-logs' with can_delete=True. Even though the override
+        # exists and grants delete, has_page_permission(user,
+        # 'audit-logs', 'delete') must be False because
+        # READONLY_PAGE_KEYS blocks writes on both the override and
+        # fallback branches.
+        user = User.objects.create_user(
+            username="readonly_override_user",
+            password="Password123!",
+            role=self.role,
+            is_active=True,
+        )
+        UserPagePermission.objects.create(
+            user=user,
+            page_key="audit-logs",
+            can_view=True,
+            can_add=True,
+            can_edit=True,
+            can_delete=True,
+        )
+        self.assertTrue(has_page_permission(user, "audit-logs", "view"))
+        self.assertFalse(has_page_permission(user, "audit-logs", "delete"))
+        self.assertFalse(has_page_permission(user, "audit-logs", "edit"))
+        self.assertFalse(has_page_permission(user, "audit-logs", "add"))
+
+    def test_archived_roles_keep_permission_rows(self):
+        # Regression guard for Phase 4: this test asserts that archiving
+        # a role does not delete its roles_permissions rows. For each
+        # existing archived role (there may be one: QUALITY_INSPECTOR
+        # if it exists), assert the role's permissions.count() is > 0.
+        # If no archived role exists yet, skip with a clear message —
+        # this test becomes load-bearing in Phase 4.2.
+        archived_roles = list(Role.objects.filter(is_archived=True))
+        if not archived_roles:
+            self.skipTest("No archived roles exist in DB yet; test becomes load-bearing in Phase 4.2.")
+        for role in archived_roles:
+            self.assertGreater(
+                role.permissions.count(),
+                0,
+                f"Archived role {role.code} unexpectedly has no permission rows",
+            )
+
+    def test_every_role_with_attendance_has_upload_biometrics(self):
+        """Regression test explicitly covering the Phase 3 backfill invariant.
+
+        Requires dev DB to have been migrated with Phase 3 migrations.
+        """
+        from users.models import Role
+        if not PagePermission.objects.filter(code='upload-biometrics').exists():
+            self.skipTest("Database does not have Phase 3 seed/migration applied.")
+        roles_with_attendance = set(
+            Role.objects.filter(
+                permissions__code__startswith='attendance'
+            ).values_list('id', flat=True)
+        ) | set(
+            Role.objects.filter(
+                permissions__code='attendance'
+            ).values_list('id', flat=True)
+        )
+        roles_with_upload = set(
+            Role.objects.filter(
+                permissions__code='upload-biometrics'
+            ).values_list('id', flat=True)
+        )
+        self.assertEqual(roles_with_attendance, roles_with_upload)
+
