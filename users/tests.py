@@ -1089,6 +1089,50 @@ class AccountApprovalTests(TestCase):
         self.assertEqual(login_response.data['user']['approval_status'], 'APPROVED')
         self.assertTrue(login_response.data['user']['is_active'])
 
+    def test_login_without_role_raises_authentication_failed(self):
+        User.objects.create_user(
+            username='user_no_role',
+            password='Password123!',
+            role=None,
+            is_active=True,
+            approval_status='APPROVED'
+        )
+        response = self.client.post('/api/auth/login/', {
+            'username': 'user_no_role',
+            'password': 'Password123!'
+        })
+        self.assertEqual(response.status_code, status.HTTP_401_UNAUTHORIZED)
+        self.assertIn('no role', str(response.data).lower())
+
+    def test_new_registration_creates_admin_user_with_is_active_false(self):
+        response = self.client.post('/api/auth/register/', {
+            'username': 'admin_applicant',
+            'email': 'admin_applicant@example.com',
+            'password': 'Password123!'
+        })
+        self.assertEqual(response.status_code, status.HTTP_201_CREATED)
+        user = User.objects.get(username='admin_applicant')
+        self.assertEqual(user.role.code, 'ADMIN')
+        self.assertFalse(user.is_active)
+
+    def test_approved_admin_can_log_in(self):
+        admin_role, _ = Role.objects.get_or_create(code='ADMIN', defaults={'name': 'Admin', 'is_system_role': True})
+        User.objects.create_user(
+            username='admin_login_user',
+            password='Password123!',
+            role=admin_role,
+            is_active=True,
+            approval_status='APPROVED'
+        )
+        response = self.client.post('/api/auth/login/', {
+            'username': 'admin_login_user',
+            'password': 'Password123!'
+        })
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        from rest_framework_simplejwt.tokens import AccessToken
+        token = AccessToken(response.data['access'])
+        self.assertEqual(token['role'], 'ADMIN')
+
     def test_nonexistent_user_login_error(self):
         login_response = self.client.post('/api/auth/login/', {
             'username': 'nonexistent_user_12345',
@@ -2012,4 +2056,111 @@ class HasPagePermissionTests(TestCase):
             ).values_list('id', flat=True)
         )
         self.assertEqual(roles_with_attendance, roles_with_upload)
+
+
+class ConsolidatedRoleModelTests(TestCase):
+    def setUp(self):
+        cache.clear()
+        self.client = APIClient()
+        self.super_admin = User.objects.create_superuser(
+            username='sa_owner',
+            password='Password123!'
+        )
+
+    def test_only_two_system_roles_exist(self):
+        self.assertEqual(Role.objects.count(), 2)
+        surviving = Role.objects.filter(code__in=['SUPER_ADMIN', 'ADMIN'])
+        self.assertEqual(surviving.count(), 2)
+        for r in surviving:
+            self.assertTrue(r.is_system_role)
+            self.assertFalse(r.is_archived)
+
+    def test_no_user_on_deleted_roles(self):
+        deleted_roles = ['HR_MANAGER', 'PAYROLL_OFFICER', 'EMPLOYEE', 'OJT', 'TEST', 'QUALITY_INSPECTOR']
+        for code in deleted_roles:
+            self.assertEqual(User.objects.filter(role__code=code).count(), 0)
+
+    def test_pending_user_cannot_login(self):
+        admin_role = Role.objects.get(code='ADMIN')
+        User.objects.create_user(
+            username='pending_admin',
+            password='Password123!',
+            role=admin_role,
+            is_active=False,
+            approval_status='PENDING'
+        )
+        response = self.client.post('/api/auth/login/', {
+            'username': 'pending_admin',
+            'password': 'Password123!'
+        })
+        self.assertIn(response.status_code, [status.HTTP_400_BAD_REQUEST, status.HTTP_401_UNAUTHORIZED])
+        self.assertIn('pending approval', str(response.data).lower())
+
+    def test_approved_user_can_login(self):
+        admin_role = Role.objects.get(code='ADMIN')
+        User.objects.create_user(
+            username='active_admin',
+            password='Password123!',
+            role=admin_role,
+            is_active=True,
+            approval_status='APPROVED'
+        )
+        response = self.client.post('/api/auth/login/', {
+            'username': 'active_admin',
+            'password': 'Password123!'
+        })
+        self.assertEqual(response.status_code, status.HTTP_200_OK)
+        self.assertIn('access', response.data)
+        from rest_framework_simplejwt.tokens import AccessToken
+        token = AccessToken(response.data['access'])
+        self.assertEqual(token['role'], 'ADMIN')
+
+    def test_account_approval_flow_end_to_end(self):
+        from users.serializers import RegisterSerializer
+        # 1. Create user via RegisterSerializer
+        reg_serializer = RegisterSerializer(data={
+            'username': 'flow_candidate',
+            'email': 'flow_candidate@example.com',
+            'password': 'Password123!'
+        })
+        self.assertTrue(reg_serializer.is_valid(), reg_serializer.errors)
+        user = reg_serializer.save()
+        self.assertEqual(user.role.code, 'ADMIN')
+        self.assertFalse(user.is_active)
+        self.assertEqual(user.approval_status, 'PENDING')
+
+        # 2. Super admin approves
+        self.client.force_authenticate(user=self.super_admin)
+        approve_res = self.client.post(f'/api/users/{user.id}/approve/', {
+            'role_code': 'ADMIN'
+        }, format='json')
+        self.assertEqual(approve_res.status_code, status.HTTP_200_OK)
+        user.refresh_from_db()
+        self.assertTrue(user.is_active)
+        self.assertEqual(user.approval_status, 'APPROVED')
+
+        # 3. User logs in, gets JWT with role='ADMIN'
+        self.client.force_authenticate(user=None)
+        login_res = self.client.post('/api/auth/login/', {
+            'username': 'flow_candidate',
+            'password': 'Password123!'
+        })
+        self.assertEqual(login_res.status_code, status.HTTP_200_OK)
+        access_token = login_res.data['access']
+        from rest_framework_simplejwt.tokens import AccessToken
+        token = AccessToken(access_token)
+        self.assertEqual(token['role'], 'ADMIN')
+
+        # 4. User accesses an endpoint (e.g. /api/auth/me/) and gets 200
+        self.client.credentials(HTTP_AUTHORIZATION=f'Bearer {access_token}')
+        me_res = self.client.get('/api/auth/me/')
+        self.assertEqual(me_res.status_code, status.HTTP_200_OK)
+
+    def test_person_person_type_counts_preserved(self):
+        from users.models import Person as P
+        field = P._meta.get_field('person_type')
+        valid = [c[0] for c in field.choices] if field.choices else []
+        self.assertIn('EMPLOYEE', valid)
+        self.assertIn('OJT', valid)
+
 
