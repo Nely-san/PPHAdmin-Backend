@@ -682,9 +682,12 @@ class UserProfileSerializer(serializers.ModelSerializer):
 class CustomTokenObtainPairSerializer(TokenObtainPairSerializer):
     @classmethod
     def get_token(cls, user):
+        if user.role is None:
+            from rest_framework.exceptions import AuthenticationFailed
+            raise AuthenticationFailed('Account has no role. Contact SUPER_ADMIN.')
         token = super().get_token(user)
         token['username'] = user.username
-        token['role'] = user.role.code if user.role else 'EMPLOYEE'
+        token['role'] = user.role.code
         return token
 
     def validate(self, attrs):
@@ -720,6 +723,10 @@ class CustomTokenObtainPairSerializer(TokenObtainPairSerializer):
             raise serializers.ValidationError({
                 "detail": "This account has been archived. Please contact an administrator."
             })
+
+        if user_obj.role is None:
+            from rest_framework.exceptions import AuthenticationFailed
+            raise AuthenticationFailed('Account has no role. Contact SUPER_ADMIN.')
 
         if user_obj.approval_status == 'PENDING' or not user_obj.is_active:
             if user_obj.approval_status == 'PENDING':
@@ -810,6 +817,8 @@ class RegisterSerializer(serializers.ModelSerializer):
         password = validated_data['password']
 
         admin_role = Role.objects.filter(code='ADMIN').first()
+        if not admin_role:
+            raise serializers.ValidationError({'detail': "Role 'ADMIN' not found."})
 
         user = User.objects.create(
             username=username,
