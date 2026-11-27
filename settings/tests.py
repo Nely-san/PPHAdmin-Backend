@@ -138,6 +138,12 @@ class RolePermissionsSecurityTests(TestCase):
         )
         self.admin_role.permissions.add(perm_edit)
 
+        perm_dashboard, _ = PagePermission.objects.get_or_create(
+            code='dashboard',
+            defaults={'name': 'Dashboard', 'module': 'MAIN'}
+        )
+        self.superadmin_role.permissions.add(perm_dashboard)
+
         self.superadmin_user, _ = User.objects.get_or_create(
             username='role_superadmin',
             defaults={
@@ -226,5 +232,21 @@ class RolePermissionsSecurityTests(TestCase):
             format='json'
         )
         self.assertEqual(response.status_code, status.HTTP_200_OK)
+
+    def test_role_update_denied_for_super_admin_permissions(self):
+        self.client.force_authenticate(user=self.superadmin_user)
+        super_admin_role = Role.objects.get(code='SUPER_ADMIN')
+        res = self.client.put(
+            f'/api/roles/{super_admin_role.id}/',
+            {'name': 'Super Admin', 'code': 'SUPER_ADMIN',
+             'permission_codes': []},
+            format='json'
+        )
+        self.assertEqual(res.status_code, status.HTTP_400_BAD_REQUEST)
+        self.assertIn('immutable', str(res.data).lower())
+        super_admin_role.refresh_from_db()
+        self.assertGreater(
+            super_admin_role.permissions.filter(code='dashboard').count(), 0
+        )
 
 

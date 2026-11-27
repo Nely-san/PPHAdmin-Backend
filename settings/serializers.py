@@ -157,15 +157,18 @@ class RoleSerializer(serializers.ModelSerializer):
             validated_data['name'] = str(validated_data['name']).strip()
 
         permission_codes = validated_data.pop('permission_codes', None)
+        if instance.code == 'SUPER_ADMIN' and permission_codes is not None:
+            raise serializers.ValidationError({
+                "permission_codes": [
+                    "SUPER_ADMIN role permissions are immutable."
+                ]
+            })
+
         for attr, value in validated_data.items():
             setattr(instance, attr, value)
         instance.save()
 
         if permission_codes is not None:
-            if instance.code == 'SUPER_ADMIN':
-                for required_code in ['dashboard', 'user-management', 'roles-permissions']:
-                    if required_code not in permission_codes and f"{required_code}:view" not in permission_codes:
-                        permission_codes.append(required_code)
             perms = self._resolve_permissions(permission_codes)
             instance.permissions.set(perms)
         return instance
