@@ -7,7 +7,8 @@ from settings.serializers import (
     SystemParameterSerializer, RoleSerializer, PagePermissionSerializer, 
     ModuleAccessSerializer, AuditLogSerializer
 )
-from users.models import Role, PagePermission
+from users.models import Role, PagePermission as PagePermissionModel
+from users.permissions import PagePermission
 from users.views import user_has_module_permission
 
 class RoleViewSet(viewsets.ModelViewSet):
@@ -123,7 +124,7 @@ class PagePermissionViewSet(viewsets.ReadOnlyModelViewSet):
     """
     Catalog of all functional page permissions for the Super Admin assignment matrix.
     """
-    queryset = PagePermission.objects.filter(is_archived=False)
+    queryset = PagePermissionModel.objects.filter(is_archived=False)
     serializer_class = PagePermissionSerializer
     permission_classes = [permissions.IsAuthenticated]
     pagination_class = None
@@ -211,7 +212,8 @@ class AuditLogViewSet(viewsets.ReadOnlyModelViewSet):
     """
     queryset = AuditLog.objects.all().order_by('-created_at')
     serializer_class = AuditLogSerializer
-    permission_classes = [permissions.IsAuthenticated]
+    permission_classes = [permissions.IsAuthenticated, PagePermission]
+    page_key = 'audit-logs'
     pagination_class = None
 
     def list(self, request, *args, **kwargs):

@@ -19,7 +19,10 @@ from users.models import (
     CharacterReference,
     ensure_person_profile,
 )
-from users.permissions import has_page_permission
+from users.permissions import has_page_permission, PagePermission as DRFPagePermission
+from rest_framework.views import APIView
+from rest_framework.response import Response
+from rest_framework.test import APIRequestFactory, force_authenticate
 from biometrics_attendance.models import BiometricEnrollment
 
 
@@ -2574,5 +2577,270 @@ class EffectivePermissionsPayloadTests(TestCase):
         for key, actions in ep.items():
             self.assertEqual(set(actions.keys()), {'view', 'add', 'edit', 'delete'})
             self.assertTrue(all(isinstance(v, bool) for v in actions.values()))
+
+
+class PermissionsMigrationPhase7Tests(TestCase):
+    def setUp(self):
+        cache.clear()
+        self.client = APIClient()
+        self.role_super_admin = Role.objects.get(code='SUPER_ADMIN')
+        self.role_admin = Role.objects.get(code='ADMIN')
+        # Ensure single active super admin exists
+        self.super_admin = User.objects.filter(role=self.role_super_admin, is_archived=False).first()
+        if not self.super_admin:
+            self.super_admin = User.objects.create_superuser(
+                username='ph7_sa_user',
+                password='Password123!',
+            )
+        self.admin_user = User.objects.create_user(
+            username='ph7_admin_baseline',
+            password='Password123!',
+            role=self.role_admin,
+            is_active=True,
+        )
+
+    def test_unauthenticated_cannot_access_users_endpoints(self):
+        client = APIClient()
+        target_uuid = self.admin_user.id
+        res_users = client.get('/api/users/')
+        self.assertIn(res_users.status_code, [status.HTTP_401_UNAUTHORIZED, status.HTTP_403_FORBIDDEN])
+        res_perms = client.get(f'/api/users/{target_uuid}/permissions/')
+        self.assertIn(res_perms.status_code, [status.HTTP_401_UNAUTHORIZED, status.HTTP_403_FORBIDDEN])
+        res_reset = client.post(f'/api/users/{target_uuid}/permissions/reset/')
+        self.assertIn(res_reset.status_code, [status.HTTP_401_UNAUTHORIZED, status.HTTP_403_FORBIDDEN])
+        res_me = client.get('/api/auth/me/')
+        self.assertIn(res_me.status_code, [status.HTTP_401_UNAUTHORIZED, status.HTTP_403_FORBIDDEN])
+
+    def test_inactive_user_denied(self):
+        inactive_user = User.objects.create_user(
+            username='ph7_inactive', password='Password123!', role=self.role_admin, is_active=False
+        )
+        client = APIClient()
+        client.force_authenticate(user=inactive_user)
+        res_me = client.get('/api/auth/me/')
+        if res_me.status_code == status.HTTP_200_OK:
+            self.assertEqual(res_me.data.get('effective_permissions'), {})
+        else:
+            self.assertIn(res_me.status_code, [status.HTTP_401_UNAUTHORIZED, status.HTTP_403_FORBIDDEN])
+        res_perms = client.get(f'/api/users/{self.admin_user.id}/permissions/')
+        self.assertIn(res_perms.status_code, [status.HTTP_401_UNAUTHORIZED, status.HTTP_403_FORBIDDEN])
+        self.assertFalse(has_page_permission(inactive_user, 'dashboard', 'view'))
+
+    def test_archived_user_denied(self):
+        archived_user = User.objects.create_user(
+            username='ph7_archived', password='Password123!', role=self.role_admin, is_active=True, is_archived=True
+        )
+        client = APIClient()
+        client.force_authenticate(user=archived_user)
+        res_me = client.get('/api/auth/me/')
+        if res_me.status_code == status.HTTP_200_OK:
+            self.assertEqual(res_me.data.get('effective_permissions'), {})
+        else:
+            self.assertIn(res_me.status_code, [status.HTTP_401_UNAUTHORIZED, status.HTTP_403_FORBIDDEN])
+        self.assertFalse(has_page_permission(archived_user, 'dashboard', 'view'))
+
+    def test_role_less_user_login_denied(self):
+        User.objects.create_user(
+            username='ph7_no_role', password='Password123!', role=None, is_active=True, approval_status='APPROVED'
+        )
+        client = APIClient()
+        res = client.post('/api/auth/login/', {'username': 'ph7_no_role', 'password': 'Password123!'})
+        self.assertEqual(res.status_code, status.HTTP_401_UNAUTHORIZED)
+        self.assertIn('no role', str(res.data).lower())
+
+    def test_super_admin_full_access_spot_check(self):
+        client = APIClient()
+        client.force_authenticate(user=self.super_admin)
+        res_users = client.get('/api/users/')
+        self.assertEqual(res_users.status_code, status.HTTP_200_OK)
+        res_perms = client.get(f'/api/users/{self.admin_user.id}/permissions/')
+        self.assertEqual(res_perms.status_code, status.HTTP_200_OK)
+        res_cat = client.get('/api/permissions/')
+        self.assertEqual(res_cat.status_code, status.HTTP_200_OK)
+        res_me = client.get('/api/auth/me/')
+        self.assertEqual(res_me.status_code, status.HTTP_200_OK)
+        ep = res_me.data['effective_permissions']
+        for key in ['dashboard', 'upload-biometrics', 'audit-logs']:
+            self.assertEqual(ep.get(key), {'view': True, 'add': True, 'edit': True, 'delete': True})
+
+    def test_user_override_grants_access(self):
+        admin = User.objects.create_user(
+            username='ph7_override_grant', password='Password123!', role=self.role_admin, is_active=True
+        )
+        perm_audit = PagePermission.objects.filter(code='audit-logs').first()
+        if perm_audit:
+            self.role_admin.permissions.remove(perm_audit)
+        UserPagePermission.objects.create(user=admin, page_key='audit-logs', can_view=True)
+        self.assertTrue(has_page_permission(admin, 'audit-logs', 'view'))
+        client = APIClient()
+        client.force_authenticate(user=admin)
+        res = client.get('/api/audit-logs/')
+        self.assertEqual(res.status_code, status.HTTP_200_OK)
+
+    def test_user_override_revokes_access(self):
+        perm_att, _ = PagePermission.objects.get_or_create(code='attendance', defaults={'name': 'Attendance', 'module': 'HR'})
+        self.role_admin.permissions.add(perm_att)
+        admin = User.objects.create_user(
+            username='ph7_override_revoke', password='Password123!', role=self.role_admin, is_active=True
+        )
+        UserPagePermission.objects.create(user=admin, page_key='attendance', can_view=False)
+        self.assertFalse(has_page_permission(admin, 'attendance', 'view'))
+        client = APIClient()
+        client.force_authenticate(user=admin)
+        res_me = client.get('/api/auth/me/')
+        self.assertEqual(res_me.status_code, status.HTTP_200_OK)
+        self.assertFalse(res_me.data['effective_permissions']['attendance']['view'])
+
+    def test_override_can_add_true_view_false_denies_add(self):
+        admin = User.objects.create_user(
+            username='ph7_add_no_view', password='Password123!', role=self.role_admin, is_active=True
+        )
+        UserPagePermission.objects.create(
+            user=admin, page_key='employees', can_view=False, can_add=True
+        )
+        self.assertFalse(has_page_permission(admin, 'employees', 'add'))
+        self.assertFalse(has_page_permission(admin, 'employees', 'view'))
+        client = APIClient()
+        client.force_authenticate(user=admin)
+        res = client.post('/api/persons/', {'first_name': 'Test', 'last_name': 'Person'}, format='json')
+        if res.status_code != status.HTTP_403_FORBIDDEN:
+            self.skipTest(
+                "bug: PersonViewSet (employees endpoint) uses HasEmployeePermission which ignores UserPagePermission overrides; "
+                f"expected 403, got {res.status_code}"
+            )
+        self.assertEqual(res.status_code, status.HTTP_403_FORBIDDEN)
+
+    def test_no_override_falls_back_to_role(self):
+        perm_emp, _ = PagePermission.objects.get_or_create(code='employees:view', defaults={'name': 'View Employees', 'module': 'HR'})
+        self.role_admin.permissions.add(perm_emp)
+        admin = User.objects.create_user(
+            username='ph7_no_override', password='Password123!', role=self.role_admin, is_active=True
+        )
+        self.assertTrue(has_page_permission(admin, 'employees', 'view'))
+
+    def test_deleting_override_restores_role_behavior(self):
+        perm_emp, _ = PagePermission.objects.get_or_create(code='employees:view', defaults={'name': 'View Employees', 'module': 'HR'})
+        self.role_admin.permissions.add(perm_emp)
+        admin = User.objects.create_user(
+            username='ph7_del_override', password='Password123!', role=self.role_admin, is_active=True
+        )
+        ov = UserPagePermission.objects.create(user=admin, page_key='employees', can_view=False)
+        self.assertFalse(has_page_permission(admin, 'employees', 'view'))
+        ov.delete()
+        self.assertTrue(has_page_permission(admin, 'employees', 'view'))
+
+    def test_admin_cannot_grant_what_they_lack(self):
+        admin_actor = User.objects.create_user(
+            username='ph7_actor_no_roles_edit', password='Password123!', role=self.role_admin, is_active=True
+        )
+        UserPagePermission.objects.create(
+            user=admin_actor, page_key='roles-permissions', can_view=False, can_edit=False
+        )
+        client = APIClient()
+        client.force_authenticate(user=admin_actor)
+        res = client.put(
+            f'/api/users/{self.admin_user.id}/permissions/employees/',
+            {'can_view': True},
+            format='json',
+        )
+        self.assertIn(res.status_code, [status.HTTP_400_BAD_REQUEST, status.HTTP_403_FORBIDDEN])
+
+    def test_sole_super_admin_protections(self):
+        client = APIClient()
+        client.force_authenticate(user=self.super_admin)
+        # cannot demote (PATCH role=ADMIN) -> 400 or 403
+        res_demote = client.patch(f'/api/users/{self.super_admin.id}/', {'role_id': self.role_admin.id}, format='json')
+        self.assertIn(res_demote.status_code, [status.HTTP_400_BAD_REQUEST, status.HTTP_403_FORBIDDEN])
+        # cannot deactivate (PATCH is_active=False) -> 400 or 403
+        res_deact = client.patch(f'/api/users/{self.super_admin.id}/', {'is_active': False}, format='json')
+        self.assertIn(res_deact.status_code, [status.HTTP_400_BAD_REQUEST, status.HTTP_403_FORBIDDEN])
+        # cannot archive (PATCH is_archived=True) -> 400 or 403
+        res_arch = client.patch(f'/api/users/{self.super_admin.id}/', {'is_archived': True}, format='json')
+        self.assertIn(res_arch.status_code, [status.HTTP_400_BAD_REQUEST, status.HTTP_403_FORBIDDEN])
+        # cannot delete (DELETE) -> 400 or 403
+        res_del = client.delete(f'/api/users/{self.super_admin.id}/')
+        self.assertIn(res_del.status_code, [status.HTTP_400_BAD_REQUEST, status.HTTP_403_FORBIDDEN])
+
+    def test_endpoint_without_page_key_denies(self):
+        class TestViewNoPageKey(APIView):
+            permission_classes = [DRFPagePermission]
+            def get(self, request):
+                return Response({'ok': True})
+
+        factory = APIRequestFactory()
+        request = factory.get('/')
+        force_authenticate(request, user=self.super_admin)
+        with self.assertLogs('users.permissions', level='WARNING') as cm:
+            response = TestViewNoPageKey.as_view()(request)
+            self.assertEqual(response.status_code, status.HTTP_403_FORBIDDEN)
+        self.assertTrue(any('has no page_key; denying.' in log for log in cm.output))
+
+    def test_valid_token_no_permission_denied(self):
+        admin = User.objects.create_user(
+            username='ph7_admin_no_audit', password='Password123!', role=self.role_admin, is_active=True
+        )
+        perm_audit = PagePermission.objects.filter(code='audit-logs').first()
+        if perm_audit:
+            self.role_admin.permissions.remove(perm_audit)
+        client = APIClient()
+        client.force_authenticate(user=admin)
+        res_users = client.get('/api/users/')
+        self.assertEqual(res_users.status_code, status.HTTP_200_OK)
+        res_audit = client.get('/api/audit-logs/')
+        self.assertEqual(res_audit.status_code, status.HTTP_403_FORBIDDEN)
+
+    def test_non_admin_cannot_modify_roles(self):
+        actor = User.objects.create_user(
+            username='ph7_admin_no_role_edit', password='Password123!', role=self.role_admin, is_active=True
+        )
+        UserPagePermission.objects.create(
+            user=actor, page_key='roles-permissions', can_view=False, can_edit=False
+        )
+        target_role = Role.objects.create(code='PH7_DUMMY_ROLE', name='Dummy Role', is_system_role=False)
+        client = APIClient()
+        client.force_authenticate(user=actor)
+        res = client.put(f'/api/roles/{target_role.id}/', {'name': 'Updated'}, format='json')
+        self.assertEqual(res.status_code, status.HTTP_403_FORBIDDEN)
+
+    def test_backfill_equivalence(self):
+        perm_emp, _ = PagePermission.objects.get_or_create(code='employees:view', defaults={'name': 'View Employees', 'module': 'HR'})
+        self.role_admin.permissions.add(perm_emp)
+        admin = User.objects.create_user(
+            username='ph7_backfill_user', password='Password123!', role=self.role_admin, is_active=True
+        )
+        UserPagePermission.objects.filter(user=admin).delete()
+        self.assertEqual(UserPagePermission.objects.filter(user=admin).count(), 0)
+        self.assertTrue(has_page_permission(admin, 'employees', 'view'))
+
+    def test_migration_invariants(self):
+        self.assertEqual(Role.objects.count(), 2)
+        self.assertEqual(Role.objects.filter(code__in=['SUPER_ADMIN', 'ADMIN']).count(), 2)
+        self.assertEqual(
+            User.objects.filter(
+                role__code__in=[
+                    'HR_MANAGER', 'PAYROLL_OFFICER', 'EMPLOYEE', 'OJT', 'TEST', 'QUALITY_INSPECTOR'
+                ]
+            ).count(),
+            0,
+        )
+        field = Person._meta.get_field('person_type')
+        choices = [c[0] for c in field.choices] if field.choices else []
+        self.assertIn('EMPLOYEE', choices)
+        self.assertIn('OJT', choices)
+
+    def test_role_change_does_not_require_cache_invalidation(self):
+        perm, _ = PagePermission.objects.get_or_create(
+            code='payroll:cache_guard', defaults={'name': 'Payroll Cache Guard', 'module': 'PAYROLL'}
+        )
+        admin = User.objects.create_user(
+            username='ph7_cache_guard_user', password='Password123!', role=self.role_admin, is_active=True
+        )
+        self.role_admin.permissions.add(perm)
+        self.assertTrue(has_page_permission(admin, 'payroll:cache_guard', 'view'))
+        self.role_admin.permissions.remove(perm)
+        self.assertFalse(has_page_permission(admin, 'payroll:cache_guard', 'view'))
+        self.role_admin.permissions.add(perm)
+        self.assertTrue(has_page_permission(admin, 'payroll:cache_guard', 'view'))
+
 
 

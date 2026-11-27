@@ -3,6 +3,7 @@ from rest_framework.response import Response
 from django.db.models import Q
 from audit.models import AuditLog
 from audit.serializers import AuditLogSerializer
+from users.permissions import PagePermission
 
 class AuditLogViewSet(viewsets.ReadOnlyModelViewSet):
     """
@@ -11,7 +12,8 @@ class AuditLogViewSet(viewsets.ReadOnlyModelViewSet):
     """
     queryset = AuditLog.objects.all().order_by('-created_at')
     serializer_class = AuditLogSerializer
-    permission_classes = [permissions.IsAuthenticated]
+    permission_classes = [permissions.IsAuthenticated, PagePermission]
+    page_key = 'audit-logs'
     pagination_class = None
 
     def list(self, request, *args, **kwargs):

@@ -1,14 +1,19 @@
 import json
 from rest_framework.test import APITestCase
 from rest_framework import status
-from users.models import User, Role
+from users.models import User, Role, PagePermission
 from audit.models import AuditLog
 from audit.signals import record_audit_log
 
 class AuditTests(APITestCase):
     def setUp(self):
         self.role, _ = Role.objects.get_or_create(code='AUDITOR', defaults={'name': 'Auditor'})
-        self.user = User.objects.create_user(username='audit_inspector', password='password123', role=self.role)
+        self.user = User.objects.create_user(username='audit_inspector', password='password123', role=self.role, is_active=True)
+        audit_perm, _ = PagePermission.objects.get_or_create(
+            code='audit-logs:view',
+            defaults={'name': 'View Audit Logs', 'module': 'SYSTEM'}
+        )
+        self.user.role.permissions.add(audit_perm)
         self.client.force_authenticate(user=self.user)
 
     def test_audit_log_creation_and_query(self):
