@@ -293,3 +293,8 @@ class AttendanceSummary(BaseModel):
 
     def __str__(self):
         return f"Summary {self.person.name} for {self.period.name}"
+
+
+# Alias for backward compatibility
+AttendanceRawLog = BiometricLog
+
