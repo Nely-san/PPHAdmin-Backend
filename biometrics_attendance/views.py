@@ -62,6 +62,26 @@ class BiometricImportViewSet(viewsets.ModelViewSet):
                 status=status.HTTP_400_BAD_REQUEST
             )
 
+        # Duplicate file detection: block re-upload of the same filename
+        if BiometricImportBatch.objects.filter(file_name=file_obj.name).exists():
+            existing = BiometricImportBatch.objects.filter(
+                file_name=file_obj.name
+            ).order_by('-imported_at').first()
+            imported_at = existing.imported_at.strftime('%b %d, %Y %I:%M %p') if existing.imported_at else 'previously'
+            return Response(
+                {
+                    "detail": (
+                        f"This file has already been imported. "
+                        f"\"{file_obj.name}\" was uploaded on {imported_at}. "
+                        f"To re-import, delete the existing batch first."
+                    ),
+                    "duplicate": True,
+                    "existing_batch_id": str(existing.id),
+                    "success": False,
+                },
+                status=status.HTTP_409_CONFLICT
+            )
+
         try:
             result = process_biometric_import(
                 file_obj=file_obj,

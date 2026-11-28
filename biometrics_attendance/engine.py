@@ -930,7 +930,16 @@ def process_biometric_import(file_obj, file_name, user_identifier='SYSTEM'):
                         is_active=True,
                     )
                 else:
-                    print(f"[biometrics] reused existing person bio_id={bio_id} name={person.name}")
+                    # Person already existed — update their name if it was a
+                    # placeholder and the XLS now has a real name for them.
+                    xls_name = (raw.get('name') or '').strip()
+                    is_placeholder = person.name.startswith('Biometric #')
+                    if xls_name and (is_placeholder or not person.name.strip()):
+                        person.name = xls_name
+                        person.save(update_fields=['name'])
+                        print(f"[biometrics] updated placeholder name bio_id={bio_id} → {xls_name}")
+                    else:
+                        print(f"[biometrics] reused existing person bio_id={bio_id} name={person.name}")
 
             schedule = Schedule.objects.filter(person=person, date=rec_date, is_archived=False).first()
             shift = schedule.shift if schedule and schedule.shift else default_shift
